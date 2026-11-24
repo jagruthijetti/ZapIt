@@ -1,0 +1,14 @@
+# Secrets & local environment
+.env
+
+# Python cache & virtual environments
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+env/
+
+# Local SQLite database & OS files
+data/
+*.db
+.DS_Store
