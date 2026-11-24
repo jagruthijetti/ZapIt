@@ -6,7 +6,6 @@ DifficultyType = Literal["Easy", "Medium", "Hard"]
 BotPersonaType = Literal["speedrunner", "professor", "chaotic"]
 
 
-# --- A. MCQ Quiz & Option-Level Micro-Tutoring Schemas ---
 class GeneratedQuestion(BaseModel):
     question_id: int
     question: str
@@ -25,7 +24,6 @@ class QuizGenerationResponse(BaseModel):
     questions: List[GeneratedQuestion]
 
 
-# --- B. AI Evaluation Schema (Used for Post-Game Redemption Checks) ---
 class AnswerEvaluationResponse(BaseModel):
     is_correct: bool
     awarded_marks: int = Field(..., ge=0)
@@ -33,7 +31,6 @@ class AnswerEvaluationResponse(BaseModel):
     evidence_from_source: str
 
 
-# --- C. AI Persona Bots ---
 class BotAnswerResponse(BaseModel):
     selected_option_index: int = Field(..., ge=0, le=3)
     thinking_delay_sec: float = Field(..., ge=1.5, le=20.0)
@@ -43,7 +40,6 @@ class BotBanterResponse(BaseModel):
     banter_line: str
 
 
-# --- D. Post-Game Personalized Remediation Deck ---
 class FlashcardItem(BaseModel):
     concept_title: str
     front_prompt: str
@@ -63,13 +59,12 @@ class RemediationDeckResponse(BaseModel):
     redemption_questions: List[RedemptionQuestion]
 
 
-# --- E. REST API Request Models ---
 class GenerateQuizRequest(BaseModel):
-    title: str = Field(..., min_length=2, max_length=120)
-    source_text: str = Field(..., min_length=20, max_length=8000)
+    title: str = Field(..., min_length=2, max_length=150)
+    source_text: str = Field(..., min_length=20, max_length=30000)
     question_count: Literal[5, 10, 15] = 5
     difficulty: DifficultyType = "Medium"
-    provider: ProviderType = "ollama"
+    provider: ProviderType = "gemini"
     host_name: str = "Host"
 
 

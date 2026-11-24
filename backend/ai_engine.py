@@ -49,15 +49,15 @@ BOT_PROFILES: Dict[BotPersonaType, Dict[str, Any]] = {
 }
 
 
-class _CompactMCQ(BaseModel):
+class CompactMCQ(BaseModel):
     question: str
     options: List[str]
     correct_index: int
     explanation: str
 
 
-class _CompactQuizResponse(BaseModel):
-    questions: List[_CompactMCQ]
+class CompactQuizResponse(BaseModel):
+    questions: List[CompactMCQ]
 
 
 def _parse_correct_index(val: Any) -> int:
@@ -97,20 +97,20 @@ async def generate_quiz_from_source(
             f"Generate a JSON object with a 'questions' list containing {needed} distinct multiple-choice questions "
             "from the source text. Each item in 'questions' must have:\n"
             "- 'question': 1 short sentence\n"
-            "- 'options': 4 short distinct choices (3-8 words each)\n"
+            "- 'options': list of 4 short distinct choices (3-8 words each)\n"
             "- 'correct_index': integer 0, 1, 2, or 3\n"
             "- 'explanation': 1 brief sentence explaining the right answer."
         )
         user_prompt = (
             f"Topic: {title} | Difficulty: {difficulty} | Generate {needed} items.{avoid_note}\n"
-            f"Source:\n{source_text[:2800]}"
+            f"Source:\n{source_text[:4000]}"
         )
 
         compact_res, model_label = await generate_structured(
             provider=provider,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            response_model=_CompactQuizResponse,
+            response_model=CompactQuizResponse,
             temperature=0.35,
             max_retries=1,
         )

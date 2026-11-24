@@ -18,6 +18,10 @@ class LLMRouterError(Exception):
     """Raised when Ollama and Gemini both fail or return invalid structured output."""
 
 
+def _clean_secret(val: str) -> str:
+    return (val or "").strip().strip('"').strip("'").strip()
+
+
 def _clean_json_text(raw: str) -> str:
     """Strip <think> blocks, markdown fences, and extract the JSON object cleanly."""
     cleaned = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL | re.IGNORECASE).strip()
@@ -32,9 +36,9 @@ def _clean_json_text(raw: str) -> str:
 
 def get_model_label(provider: ProviderType) -> str:
     if provider == "ollama":
-        return f"Ollama ({settings.OLLAMA_MODEL})"
+        return f"Ollama ({_clean_secret(settings.OLLAMA_MODEL)})"
     if provider == "gemini":
-        return f"Gemini ({settings.GEMINI_MODEL})"
+        return f"Gemini ({_clean_secret(settings.GEMINI_MODEL)})"
     return provider
 
 
@@ -42,11 +46,12 @@ def _get_gemini_candidates() -> List[str]:
     seen = set()
     candidates: List[str] = []
     for model_name in [
-        settings.GEMINI_MODEL,
+        _clean_secret(settings.GEMINI_MODEL),
         "gemini-3.5-flash-lite",
         "gemini-3.8-flash",
         "gemini-3.6-flash",
         "gemini-3.1-flash-lite",
+        "gemini-2.5-flash",
     ]:
         if model_name and model_name not in seen:
             seen.add(model_name)
@@ -84,7 +89,8 @@ async def _call_ollama_native(
     schema_hint: str,
     temperature: float,
 ) -> Tuple[str, str]:
-    ollama_host = settings.OLLAMA_BASE_URL.removesuffix("/v1").rstrip("/")
+    ollama_host = _clean_secret(settings.OLLAMA_BASE_URL).removesuffix("/v1").rstrip("/")
+    model_name = _clean_secret(settings.OLLAMA_MODEL)
     url = f"{ollama_host}/api/chat"
     enriched_system = (
         f"{system_prompt}\n\n"
@@ -93,7 +99,7 @@ async def _call_ollama_native(
         f"{schema_hint}"
     )
     payload = {
-        "model": settings.OLLAMA_MODEL,
+        "model": model_name,
         "messages": [
             {"role": "system", "content": enriched_system},
             {"role": "user", "content": user_prompt},
@@ -105,7 +111,7 @@ async def _call_ollama_native(
         "options": {
             "temperature": temperature,
             "num_ctx": 2048,
-            "num_predict": 1200,
+            "num_predict": 1400,
         },
     }
     try:
@@ -113,23 +119,30 @@ async def _call_ollama_native(
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
-            return data.get("message", {}).get("content", "{}"), f"Ollama ({settings.OLLAMA_MODEL})"
+            return data.get("message", {}).get("content", "{}"), f"Ollama ({model_name})"
     except httpx.ConnectError:
         raise LLMRouterError(
-            f"Cannot connect to Ollama at {ollama_host}. Start Ollama (`ollama serve`) or switch to Gemini Flash."
+            f"Cannot connect to Ollama at {ollama_host}. Start Ollama locally or switch AI Engine to Gemini Flash (Cloud)."
         )
 
 
 async def _call_gemini(
     system_prompt: str,
     user_prompt: str,
-    response_model: Type[T],
+    schema_hint: str,
     temperature: float,
 ) -> Tuple[str, str]:
-    if not settings.GEMINI_API_KEY or settings.GEMINI_API_KEY.startswith("your_"):
-        raise LLMRouterError("GEMINI_API_KEY is missing in .env")
+    api_key = _clean_secret(settings.GEMINI_API_KEY)
+    if not api_key or api_key.startswith("your_"):
+        raise LLMRouterError("GEMINI_API_KEY is missing. Add your active Google AI Studio key in .env / Render.")
 
-    client = genai.Client(api_key=settings.GEMINI_API_KEY)
+    enriched_system = (
+        f"{system_prompt}\n\n"
+        "CRITICAL: Respond with ONLY a valid JSON object matching this exact schema structure:\n"
+        f"{schema_hint}"
+    )
+
+    client = genai.Client(api_key=api_key)
     candidates = _get_gemini_candidates()
     attempted: List[str] = []
     last_err: Exception | None = None
@@ -141,23 +154,25 @@ async def _call_gemini(
                 model=model_name,
                 contents=user_prompt,
                 config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
+                    system_instruction=enriched_system,
                     temperature=temperature,
                     response_mime_type="application/json",
-                    response_schema=response_model,
                 ),
             )
-            return (response.text or "{}"), f"Gemini ({model_name})"
+            raw_text = (getattr(response, "text", None) or "").strip()
+            if not raw_text:
+                raise LLMRouterError(f"Gemini ({model_name}) returned an empty response.")
+            return raw_text, f"Gemini ({model_name})"
         except Exception as err:
             last_err = err
             err_str = str(err)
-            if any(code in err_str for code in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "404")):
+            if any(code in err_str for code in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "404", "NOT_FOUND")):
                 if idx < len(candidates) - 1:
-                    await asyncio.sleep(1.0 * (idx + 1))
+                    await asyncio.sleep(0.8 * (idx + 1))
                     continue
             raise
 
-    raise LLMRouterError(f"Gemini models busy ({', '.join(attempted)}): {last_err}")
+    raise LLMRouterError(f"Gemini models unavailable ({', '.join(attempted)}): {last_err}")
 
 
 async def generate_structured(
@@ -185,18 +200,21 @@ async def generate_structured(
                     raw_text, used_label = await _call_gemini(
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
-                        response_model=response_model,
+                        schema_hint=schema_hint,
                         temperature=temperature,
                     )
                 except Exception as gemini_err:
                     if any(code in str(gemini_err) for code in ("503", "UNAVAILABLE", "429")):
-                        raw_text, ollama_label = await _call_ollama_native(
-                            system_prompt=system_prompt,
-                            user_prompt=user_prompt,
-                            schema_hint=schema_hint,
-                            temperature=temperature,
-                        )
-                        used_label = f"{ollama_label} [Cloud 503 Failover]"
+                        try:
+                            raw_text, ollama_label = await _call_ollama_native(
+                                system_prompt=system_prompt,
+                                user_prompt=user_prompt,
+                                schema_hint=schema_hint,
+                                temperature=temperature,
+                            )
+                            used_label = f"{ollama_label} [Cloud Busy Failover]"
+                        except Exception:
+                            raise gemini_err
                     else:
                         raise
             else:
@@ -208,7 +226,7 @@ async def generate_structured(
 
         except (ValidationError, json.JSONDecodeError) as e:
             last_error = e
-            user_prompt += "\n\nReturn strict valid JSON matching the exact keys."
+            user_prompt += "\n\nReturn ONLY strict valid JSON matching the exact keys shown in the schema."
         except Exception as e:
             last_error = e
             if attempt < max_retries:
