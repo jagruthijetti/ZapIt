@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import aiosqlite
+import certifi
 from motor.motor_asyncio import AsyncIOMotorClient
 
 from backend.config import settings
@@ -24,11 +25,20 @@ def is_mongo_enabled() -> bool:
 async def init_db() -> None:
     global _mongo_client, _mongo_db
     if is_mongo_enabled():
-        _mongo_client = AsyncIOMotorClient(settings.MONGODB_URI, serverSelectionTimeoutMS=5000)
-        _mongo_db = _mongo_client[settings.MONGODB_DB_NAME]
-        await _mongo_client.admin.command("ping")
-        print(f"[ZapIt DB] Connected to MongoDB Atlas -> {settings.MONGODB_DB_NAME}", flush=True)
-        return
+        try:
+            _mongo_client = AsyncIOMotorClient(
+                settings.MONGODB_URI,
+                tlsCAFile=certifi.where(),
+                serverSelectionTimeoutMS=5000,
+            )
+            _mongo_db = _mongo_client[settings.MONGODB_DB_NAME]
+            await _mongo_client.admin.command("ping")
+            print(f"[ZapIt DB] Connected to MongoDB Atlas -> {settings.MONGODB_DB_NAME}", flush=True)
+            return
+        except Exception as err:
+            print(f"[ZapIt DB] MongoDB Atlas unavailable ({err}). Falling back to SQLite...", flush=True)
+            _mongo_client = None
+            _mongo_db = None
 
     db_dir = os.path.dirname(settings.SQLITE_DB_PATH)
     if db_dir:
