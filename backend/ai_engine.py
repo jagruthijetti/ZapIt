@@ -80,6 +80,7 @@ async def generate_quiz_from_source(
     source_text: str,
     question_count: int,
     difficulty: DifficultyType,
+    default_time_limit: int = 20,
 ) -> Tuple[QuizGenerationResponse, str]:
     collected: List[GeneratedQuestion] = []
     seen_questions: set[str] = set()
@@ -151,7 +152,7 @@ async def generate_quiz_from_source(
                     reference_answer=f"{OPTION_LETTERS[c_idx]}) {opts[c_idx]} — {exp}",
                     option_explanations=option_explanations,
                     max_marks=2,
-                    time_limit=20,
+                    time_limit=max(10, min(90, int(default_time_limit))),
                 )
             )
 
@@ -203,7 +204,6 @@ async def evaluate_player_answer(
     return res, model_label
 
 
-# 3A. AI Persona Bot MCQ Selection
 async def simulate_bot_answer(
     provider: ProviderType,
     persona: BotPersonaType,
@@ -211,7 +211,14 @@ async def simulate_bot_answer(
 ) -> BotAnswerResponse:
     profile = BOT_PROFILES[persona]
     correct_idx = int(question["correct_option_index"])
-    delay = round(random.uniform(profile["min_delay"], profile["max_delay"]), 1)
+    time_limit = max(10, int(question.get("time_limit", 20)))
+
+    # Scale bot delay proportionally to the question's custom time limit
+    ratio_min = profile["min_delay"] / 20.0
+    ratio_max = profile["max_delay"] / 20.0
+    scaled_min = max(1.2, time_limit * ratio_min)
+    scaled_max = max(scaled_min + 0.5, min(time_limit - 1.5, time_limit * ratio_max))
+    delay = round(random.uniform(scaled_min, scaled_max), 1)
 
     if random.random() < profile["accuracy"]:
         chosen = correct_idx
@@ -220,7 +227,6 @@ async def simulate_bot_answer(
         chosen = random.choice(wrong_choices)
 
     return BotAnswerResponse(selected_option_index=chosen, thinking_delay_sec=delay)
-
 
 # 3B. Live Leaderboard Bot Banter
 async def generate_bot_banter(

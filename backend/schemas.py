@@ -66,6 +66,7 @@ class GenerateQuizRequest(BaseModel):
     difficulty: DifficultyType = "Medium"
     provider: ProviderType = "gemini"
     host_name: str = "Host"
+    default_time_limit: int = Field(default=20, ge=10, le=90)
 
 
 class PublishQuizRequest(BaseModel):
