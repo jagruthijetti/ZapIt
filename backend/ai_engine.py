@@ -73,7 +73,7 @@ def _parse_correct_index(val: Any) -> int:
     return 0
 
 
-# 1. Fast Pre-Game MCQ Generation (Guaranteed Exact Count)
+# 1. Fast Pre-Game MCQ Generation (Strictly Grounded in Class Notes)
 async def generate_quiz_from_source(
     provider: ProviderType,
     title: str,
@@ -95,15 +95,17 @@ async def generate_quiz_from_source(
 
         system_prompt = (
             f"Generate a JSON object with a 'questions' list containing {needed} distinct multiple-choice questions "
-            "from the source text. Each item in 'questions' must have:\n"
-            "- 'question': 1 short sentence\n"
-            "- 'options': list of 4 short distinct choices (3-8 words each)\n"
+            "STRICTLY based ONLY on the facts, definitions, and concepts explicitly stated in the provided Class Notes. "
+            "DO NOT use outside knowledge or invent facts not present in the notes. "
+            "Each item in 'questions' must have:\n"
+            "- 'question': 1 clear sentence testing a specific concept from the notes\n"
+            "- 'options': list of 4 short distinct choices (3-10 words each)\n"
             "- 'correct_index': integer 0, 1, 2, or 3\n"
-            "- 'explanation': 1 brief sentence explaining the right answer."
+            "- 'explanation': 1 brief sentence citing why the answer is correct according to the notes."
         )
         user_prompt = (
             f"Topic: {title} | Difficulty: {difficulty} | Generate {needed} items.{avoid_note}\n"
-            f"Source:\n{source_text[:4000]}"
+            f"=== CLASS NOTES START ===\n{source_text[:12000]}\n=== CLASS NOTES END ==="
         )
 
         compact_res, model_label = await generate_structured(
@@ -111,7 +113,7 @@ async def generate_quiz_from_source(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             response_model=CompactQuizResponse,
-            temperature=0.35,
+            temperature=0.25,
             max_retries=1,
         )
 
@@ -132,10 +134,10 @@ async def generate_quiz_from_source(
                 opts.append(f"Option {OPTION_LETTERS[len(opts)]}")
 
             c_idx = _parse_correct_index(cq.correct_index)
-            exp = str(cq.explanation or "").strip() or f"'{opts[c_idx]}' is directly supported by the source text."
+            exp = str(cq.explanation or "").strip() or f"'{opts[c_idx]}' is directly stated in the class notes."
 
             option_explanations = [
-                f"Correct! {exp}" if i == c_idx else f"Incorrect — '{opts[i]}' is not right. {exp}"
+                f"Correct! {exp}" if i == c_idx else f"Incorrect — '{opts[i]}' is not right according to the notes. {exp}"
                 for i in range(4)
             ]
 
@@ -154,12 +156,12 @@ async def generate_quiz_from_source(
             )
 
     if not collected:
-        raise ValueError("The AI model returned 0 valid questions. Try again or switch provider.")
+        raise ValueError("The AI model returned 0 valid questions. Try again or check your uploaded notes.")
 
     return QuizGenerationResponse(questions=collected), model_label
 
 
-# 2. Redemption Open-Ended Verification (Used in Post-Game Study Deck)
+# 2. Redemption Open-Ended Verification
 async def evaluate_player_answer(
     provider: ProviderType,
     source_text: str,
@@ -180,7 +182,7 @@ async def evaluate_player_answer(
         )
 
     system_prompt = (
-        "Grade the student's practice answer (0, 1, or 2 marks) against the reference answer. "
+        "Grade the student's practice answer (0, 1, or 2 marks) against the reference answer from the class notes. "
         "Give 1 concise sentence of micro_tutoring."
     )
     user_prompt = (
@@ -255,7 +257,7 @@ async def generate_player_remediation(
     if not missed_items:
         focus_prompt = (
             f"{player_name} scored 100%! Create 5 short advanced flashcards "
-            "and 2 challenge redemption questions from the source."
+            "and 2 challenge redemption questions strictly from the class notes."
         )
     else:
         formatted_misses = "\n".join(
@@ -266,14 +268,14 @@ async def generate_player_remediation(
         )
         focus_prompt = (
             f"{player_name} missed:\n{formatted_misses}\n"
-            "Create 5 concise flashcards and 2 redemption practice questions fixing these gaps."
+            "Create 5 concise flashcards and 2 redemption practice questions strictly from the class notes fixing these gaps."
         )
 
     system_prompt = (
-        "Build a concise study deck from the source text. Keep all strings short (1 sentence max). "
+        "Build a concise study deck strictly from the provided class notes. Keep all strings short (1 sentence max). "
         "Return 'weak_concepts_summary', 5 'flashcards', and 2 'redemption_questions'."
     )
-    user_prompt = f"Source:\n{source_text[:2500]}\n\n{focus_prompt}"
+    user_prompt = f"Class Notes:\n{source_text[:6000]}\n\n{focus_prompt}"
 
     return await generate_structured(
         provider=provider,

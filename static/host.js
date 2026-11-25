@@ -532,3 +532,57 @@ function escapeHtml(str) {
 }
 
 loadSystemStatus();
+
+function updateWordCount() {
+  const txt = (document.getElementById("quiz-source")?.value || "").trim();
+  const words = txt ? txt.split(/\s+/).length : 0;
+  const badge = document.getElementById("word-count-badge");
+  if (badge) badge.innerText = `${words} words`;
+}
+
+async function handleNotesFileUpload(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+
+  showGenError("");
+  const nameLabel = document.getElementById("uploaded-file-name");
+  const metaLabel = document.getElementById("uploaded-file-meta");
+  const sourceBox = document.getElementById("quiz-source");
+  const titleInput = document.getElementById("quiz-title");
+
+  if (nameLabel) nameLabel.innerText = `⏳ Extracting text from ${file.name}...`;
+  if (metaLabel) metaLabel.innerText = "Reading slides, paragraphs, and tables...";
+
+  try {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const res = await fetch("/api/documents/extract", {
+      method: "POST",
+      body: formData,
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.detail || `Upload failed (HTTP ${res.status})`);
+    }
+
+    if (sourceBox) {
+      sourceBox.value = data.extracted_text;
+      updateWordCount();
+    }
+    if (titleInput && !titleInput.value.trim()) {
+      titleInput.value = file.name.replace(/\.[^/.]+$/, "").replace(/[_-]+/g, " ");
+    }
+
+    if (nameLabel) nameLabel.innerText = `✅ Loaded: ${data.filename}`;
+    if (metaLabel) {
+      metaLabel.innerText = `${data.char_count.toLocaleString()} characters extracted — questions will strictly follow these notes`;
+    }
+  } catch (err) {
+    if (nameLabel) nameLabel.innerText = "Upload Class Notes (.pptx, .docx, .pdf, .txt)";
+    if (metaLabel) metaLabel.innerText = "AI will generate questions strictly from your uploaded slides/notes";
+    showGenError("Document Upload Error: " + err.message);
+  } finally {
+    event.target.value = "";
+  }
+}

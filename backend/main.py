@@ -4,7 +4,8 @@ import traceback
 import uuid
 from contextlib import asynccontextmanager
 from typing import Literal
-
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from backend.doc_parser import extract_text_from_file
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -147,6 +148,29 @@ async def api_reserve_pin(req: ReservePinRequest):
         "model_label": get_model_label(req.provider),
     }
 
+@app.post("/api/documents/extract")
+async def api_extract_document(file: UploadFile = File(...)):
+    try:
+        raw_bytes = await file.read()
+        extracted = extract_text_from_file(file.filename or "notes.txt", raw_bytes)
+        if len(extracted) < 20:
+            raise HTTPException(
+                status_code=400,
+                detail="Could not find enough readable text in that file (scanned image PDFs are not supported). Try a text-based PPTX, DOCX, PDF, or paste notes directly.",
+            )
+        return {
+            "filename": file.filename,
+            "extracted_text": extracted[:30000],
+            "char_count": len(extracted),
+            "truncated": len(extracted) > 30000,
+        }
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
+    except HTTPException:
+        raise
+    except Exception as err:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to read file: {err}")
 
 @app.post("/api/quizzes/generate")
 async def api_generate_quiz(req: GenerateQuizRequest):
