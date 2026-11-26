@@ -3,6 +3,7 @@ let reservedPin = null;
 let generatedQuestions = [];
 let selectedBots = new Set();
 let genTimerInterval = null;
+let currentJoinUrl = "";
 
 const TIMER_OPTIONS = [10, 15, 20, 30, 45, 60, 90];
 
@@ -338,6 +339,40 @@ function removeStudioQuestion(idx) {
   renderStudioQuestions();
 }
 
+function renderLobbyQrCode(pin) {
+  currentJoinUrl = `${location.origin}/?pin=${encodeURIComponent(pin)}`;
+  const qrBox = document.getElementById("lobby-qr-box");
+  if (!qrBox) return;
+  qrBox.innerHTML = "";
+
+  if (window.QRCode) {
+    new QRCode(qrBox, {
+      text: currentJoinUrl,
+      width: 132,
+      height: 132,
+      colorDark: "#09090b",
+      colorLight: "#ffffff",
+      correctLevel: QRCode.CorrectLevel.M,
+    });
+  } else {
+    qrBox.innerHTML = `<span class="text-xs text-zinc-800 font-mono p-2">${pin}</span>`;
+  }
+}
+
+async function copyLobbyJoinLink() {
+  if (!currentJoinUrl) return;
+  const btn = document.getElementById("btn-copy-join-link");
+  try {
+    await navigator.clipboard.writeText(currentJoinUrl);
+    if (btn) {
+      btn.innerText = "✅ Link Copied!";
+      setTimeout(() => (btn.innerText = "📋 Copy Direct Join Link"), 2000);
+    }
+  } catch (_) {
+    prompt("Copy this direct join link:", currentJoinUrl);
+  }
+}
+
 async function publishQuiz() {
   if (!generatedQuestions.length) return;
 
@@ -387,6 +422,7 @@ async function publishQuiz() {
     document.getElementById("lobby-pin").innerText = activePin;
     document.getElementById("lobby-quiz-title").innerText = title;
     document.getElementById("lobby-join-url").innerText = `${location.origin}/`;
+    renderLobbyQrCode(activePin);
 
     connectHostWebSocket(activePin);
     showView("view-lobby");

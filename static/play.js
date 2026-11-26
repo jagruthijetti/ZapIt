@@ -450,3 +450,18 @@ function escapeHtml(str) {
 if (window.gsap) {
   gsap.from("#view-join", { opacity: 0, y: 20, duration: 0.45, ease: "power3.out" });
 }
+(function prefillPinFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const urlPin = (params.get("pin") || "").replace(/\D/g, "").slice(0, 6);
+  if (urlPin) {
+    const pinInput = document.getElementById("join-pin");
+    const nameInput = document.getElementById("join-name");
+    if (pinInput) {
+      pinInput.value = urlPin;
+      pinInput.classList.add("border-cyan-400", "ring-2", "ring-cyan-500/30");
+    }
+    if (nameInput) {
+      nameInput.focus();
+    }
+  }
+})();
