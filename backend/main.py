@@ -181,6 +181,7 @@ async def api_generate_quiz(req: GenerateQuizRequest):
             source_text=req.source_text,
             question_count=req.question_count,
             difficulty=req.difficulty,
+            default_time_limit=req.default_time_limit,
         )
         return {
             "questions": [q.model_dump() for q in quiz_data.questions],
