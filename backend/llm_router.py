@@ -59,15 +59,19 @@ async def _call_gemini_structured(
     system_prompt: str,
     user_prompt: str,
     response_schema: Type[T],
+    fast_mode: bool = False,
 ) -> Tuple[T, str]:
     api_key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip()
     if not api_key:
         raise LLMRouterError("GEMINI_API_KEY is not configured in environment variables.")
 
-    primary_model = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
+    primary_model = (
+        "gemini-2.5-flash-lite"
+        if fast_mode
+        else (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
+    )
     models_to_try = _get_gemini_fallback_models(primary_model)
     last_error: Exception = RuntimeError("Unknown Gemini error")
-
     for model_name in models_to_try:
         for attempt in range(2):
             try:
@@ -178,8 +182,9 @@ async def call_structured_llm(
     system_prompt: str,
     user_prompt: str,
     response_schema: Type[T],
+    fast_mode: bool = False,
 ) -> Tuple[T, str]:
     clean = (provider or "gemini").strip().lower()
     if clean == "ollama":
         return await _call_ollama_structured(system_prompt, user_prompt, response_schema)
-    return await _call_gemini_structured(system_prompt, user_prompt, response_schema)
+    return await _call_gemini_structured(system_prompt, user_prompt, response_schema, fast_mode=fast_mode)

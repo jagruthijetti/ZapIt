@@ -161,6 +161,7 @@ Return a brief encouraging `summary`, `topic_flashcards`, `flashcards` (mistake 
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             response_schema=RemediationDeckResponse,
+            fast_mode=True,
         )
     except Exception:
         topic_cards = [

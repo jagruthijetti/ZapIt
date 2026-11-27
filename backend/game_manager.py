@@ -465,7 +465,6 @@ async def finish_round(room: GameRoom) -> None:
                     }
                 )
 
-            # Participant mid-quiz payload intentionally omits points and standings
             per_player_results[p.player_id] = {
                 "is_correct": is_correct,
                 "selected_option_index": sel_idx,
@@ -556,6 +555,12 @@ async def finish_round(room: GameRoom) -> None:
                 except Exception:
                     p.ws = None
 
+        # Pre-warm each player's study kit during the 6s countdown after the final question
+        if is_last:
+            for p in list(room.participants.values()):
+                if not p.is_bot:
+                    asyncio.create_task(_prewarm_player_study_kit(room, p))
+
         room.auto_next_task = asyncio.create_task(_run_auto_next_countdown(room, room.current_index))
 
 
@@ -596,38 +601,31 @@ def _build_fast_fallback_study_kit(room: GameRoom, p: Participant) -> Dict[str, 
     }
 
 
-async def _deliver_player_study_kit(room: GameRoom, p: Participant) -> None:
-    if p.is_bot:
+async def _prewarm_player_study_kit(room: GameRoom, p: Participant) -> None:
+    if p.is_bot or p.player_id in room.player_study_kits:
         return
 
-    # If the participant answered everything right, deliver immediately in <50ms without waiting on an LLM call
     if not p.missed_questions:
         deck_dict = _build_fast_fallback_study_kit(room, p)
         room.player_study_kits[p.player_id] = deck_dict
-        if p.ws is not None:
-            try:
-                await p.ws.send_json({"type": "STUDY_KIT_READY", "remediation_deck": deck_dict})
-            except Exception:
-                p.ws = None
         return
 
     try:
-        # Cap LLM generation at 6 seconds so participants never wait long
         deck_obj, model_used = await asyncio.wait_for(
             generate_remediation_deck(
                 provider=room.provider,
-                source_text=room.source_text[:3500],
+                source_text=room.source_text[:2500],
                 missed_questions=p.missed_questions,
                 all_questions=room.questions,
             ),
-            timeout=6.0,
+            timeout=5.0,
         )
         deck_dict = deck_obj.model_dump()
         if not deck_dict.get("topic_flashcards"):
             deck_dict["topic_flashcards"] = room.topic_flashcards
     except Exception:
         deck_dict = _build_fast_fallback_study_kit(room, p)
-        model_used = "Fast Concept Kit"
+        model_used = "Instant Concept Kit"
 
     room.player_study_kits[p.player_id] = deck_dict
 
@@ -642,14 +640,9 @@ async def _deliver_player_study_kit(room: GameRoom, p: Participant) -> None:
     except Exception:
         pass
 
-    if p.ws is not None:
+    if room.status == "COMPLETED" and p.ws is not None:
         try:
-            await p.ws.send_json(
-                {
-                    "type": "STUDY_KIT_READY",
-                    "remediation_deck": deck_dict,
-                }
-            )
+            await p.ws.send_json({"type": "STUDY_KIT_READY", "remediation_deck": deck_dict})
         except Exception:
             p.ws = None
 
@@ -670,6 +663,7 @@ async def _complete_match(room: GameRoom) -> None:
 
     for p in list(room.participants.values()):
         if not p.is_bot and p.ws is not None:
+            ready_kit = room.player_study_kits.get(p.player_id) or _build_fast_fallback_study_kit(room, p)
             try:
                 await p.ws.send_json(
                     {
@@ -684,16 +678,16 @@ async def _complete_match(room: GameRoom) -> None:
                             "total_questions": len(room.questions),
                             "missed_count": len(p.missed_questions),
                         },
+                        "remediation_deck": ready_kit,
                     }
                 )
             except Exception:
                 p.ws = None
 
+            if p.player_id not in room.player_study_kits:
+                asyncio.create_task(_prewarm_player_study_kit(room, p))
+
     try:
         await update_room_status(room.pin, "COMPLETED")
     except Exception:
         pass
-
-    for p in list(room.participants.values()):
-        if not p.is_bot:
-            asyncio.create_task(_deliver_player_study_kit(room, p))
