@@ -698,26 +698,61 @@ function connectHostWebSocket(pin) {
 
     if (msg.type === "PODIUM") {
       showView("view-podium");
-      document.getElementById("host-podium-list").innerHTML = (msg.leaderboard || [])
-        .map(
-          (p, idx) => `
-          <div class="flex items-center justify-between px-4 py-3 rounded-2xl ${
-            idx === 0 ? "bg-violet-600/25 border border-violet-500/50" : "bg-zinc-900 border border-zinc-800"
-          }">
-            <div class="flex items-center gap-3">
-              <span class="font-display font-bold text-zinc-400 w-7">#${p.rank}</span>
-              <span class="text-xl">${p.avatar}</span>
-              <div>
-                <div class="font-bold text-sm">${escapeHtml(p.name)}</div>
-                <div class="text-[11px] text-zinc-400">${escapeHtml(p.student_id)}</div>
-              </div>
-            </div>
-            <span class="font-display font-bold text-cyan-400">${p.score} pts</span>
-          </div>
-        `
-        )
-        .join("");
-      if (window.confetti) confetti({ particleCount: 90, spread: 75, origin: { y: 0.6 } });
+      const board = msg.leaderboard || [];
+      const totalQ = msg.total_questions || generatedQuestions.length || 0;
+      const winnerBanner = document.getElementById("host-winner-banner");
+      const podiumList = document.getElementById("host-podium-list");
+
+      if (winnerBanner) {
+        if (board.length > 0) {
+          const top = board[0];
+          winnerBanner.innerText = `🥇 Winner: ${top.avatar || "🏆"} ${top.name} — ${top.score} pts`;
+          winnerBanner.classList.remove("hidden");
+        } else {
+          winnerBanner.classList.add("hidden");
+        }
+      }
+
+      if (podiumList) {
+        const medals = ["🥇", "🥈", "🥉"];
+        podiumList.innerHTML = board.length
+          ? board
+              .map((p, idx) => {
+                const medal = medals[idx] || `#${p.rank}`;
+                const rowStyle =
+                  idx === 0
+                    ? "bg-amber-500/15 border border-amber-400/60 shadow-lg shadow-amber-500/10"
+                    : idx === 1
+                    ? "bg-violet-600/20 border border-violet-500/40"
+                    : idx === 2
+                    ? "bg-cyan-500/15 border border-cyan-500/35"
+                    : "bg-zinc-900 border border-zinc-800";
+
+                const correctBadge =
+                  totalQ > 0 ? ` • ${p.correct_count || 0}/${totalQ} Correct` : "";
+
+                return `
+                  <div class="flex items-center justify-between px-4 py-3.5 rounded-2xl ${rowStyle}">
+                    <div class="flex items-center gap-3">
+                      <span class="font-display font-bold text-lg w-8 text-center">${medal}</span>
+                      <span class="text-2xl">${p.avatar || "🦊"}</span>
+                      <div>
+                        <div class="font-bold text-sm text-white">${escapeHtml(p.name)}</div>
+                        <div class="text-[11px] text-zinc-400">${escapeHtml(p.student_id || "")}${correctBadge}</div>
+                      </div>
+                    </div>
+                    <div class="text-right">
+                      <div class="font-display font-bold text-base text-cyan-300">${p.score || 0} pts</div>
+                      <div class="text-[10px] uppercase tracking-wider text-zinc-400">Rank #${p.rank}</div>
+                    </div>
+                  </div>
+                `;
+              })
+              .join("")
+          : `<p class="text-xs text-zinc-400 text-center py-4">No participant scores recorded for this match.</p>`;
+      }
+
+      if (window.confetti) confetti({ particleCount: 95, spread: 75, origin: { y: 0.6 } });
     }
   };
 }

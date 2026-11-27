@@ -554,17 +554,23 @@ async def finish_round(room: GameRoom) -> None:
 
 async def _complete_match(room: GameRoom) -> None:
     room.status = "COMPLETED"
-    await update_room_status(room.pin, "COMPLETED")
     leaderboard = room.get_leaderboard()
     rank_map = {row["player_id"]: row["rank"] for row in leaderboard}
 
+    # Broadcast final standings to Host immediately so the podium displays without delay
     await room.send_to_host(
         {
             "type": "PODIUM",
             "title": room.title,
+            "total_questions": len(room.questions),
             "leaderboard": leaderboard,
         }
     )
+
+    try:
+        await update_room_status(room.pin, "COMPLETED")
+    except Exception:
+        pass
 
     for p in list(room.participants.values()):
         if not p.is_bot and p.ws is not None:
