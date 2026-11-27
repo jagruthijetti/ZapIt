@@ -291,3 +291,40 @@ async def generate_player_remediation(
         temperature=0.3,
         max_retries=0,
     )
+
+async def generate_bot_choice(
+    provider: str,
+    persona: str,
+    question: Dict[str, Any],
+    time_limit: int = 20,
+) -> BotAnswerResponse:
+    """
+    Simulates an AI persona competitor selecting one of the 4 MCQ options
+    with realistic accuracy and response timing.
+    """
+    correct_idx = int(question.get("correct_option_index", 0))
+    options: List[str] = question.get("options", [])
+    wrong_indices = [i for i in range(len(options)) if i != correct_idx] or [0]
+
+    # Persona accuracy and speed profiles
+    if persona == "professor":
+        accuracy = 0.90
+        min_delay, max_delay = 3.5, min(9.0, max(4.5, time_limit * 0.45))
+    elif persona == "speedrunner":
+        accuracy = 0.65
+        min_delay, max_delay = 1.2, min(4.0, max(2.0, time_limit * 0.25))
+    else:  # chaotic / wildcard
+        accuracy = 0.45
+        min_delay, max_delay = 1.5, min(11.0, max(3.0, time_limit * 0.6))
+
+    delay = round(random.uniform(min_delay, max_delay), 2)
+
+    if random.random() < accuracy:
+        chosen_idx = correct_idx
+    else:
+        chosen_idx = random.choice(wrong_indices)
+
+    return BotAnswerResponse(
+        selected_option_index=max(0, min(3, chosen_idx)),
+        thinking_delay_sec=delay,
+    )
