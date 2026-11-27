@@ -598,3 +598,5 @@ async def _build_and_send_remediation(
     except Exception as err:
         if player.ws:
             await GameRoom._safe_send(player.ws, {"type": "REMEDIATION_ERROR", "detail": str(err)})
+
+finish_round = finalize_current_question
