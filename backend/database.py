@@ -1,248 +1,269 @@
 import json
 import os
+import random
+import string
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import aiosqlite
 import certifi
 from motor.motor_asyncio import AsyncIOMotorClient
 
-from backend.config import settings
+MONGO_URI = os.getenv("MONGO_URI", "").strip()
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "zapit_db").strip() or "zapit_db"
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+SQLITE_PATH = BASE_DIR / "zapit_local.db"
 
 _mongo_client: Optional[AsyncIOMotorClient] = None
 _mongo_db = None
+_use_mongo = False
+_db_status_label = "Initializing..."
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def is_mongo_enabled() -> bool:
-    uri = (settings.MONGODB_URI or "").strip()
-    return bool(uri) and "your_user" not in uri and uri.startswith("mongodb")
+def get_database_status() -> Dict[str, Any]:
+    return {
+        "database": _db_status_label,
+        "using_mongo": _use_mongo,
+        "db_name": MONGO_DB_NAME if _use_mongo else SQLITE_PATH.name,
+    }
 
 
-async def init_db() -> None:
-    global _mongo_client, _mongo_db
-    if is_mongo_enabled():
-        try:
-            _mongo_client = AsyncIOMotorClient(
-                settings.MONGODB_URI,
-                tlsCAFile=certifi.where(),
-                serverSelectionTimeoutMS=5000,
-            )
-            _mongo_db = _mongo_client[settings.MONGODB_DB_NAME]
-            await _mongo_client.admin.command("ping")
-            print(f"[ZapIt DB] Connected to MongoDB Atlas -> {settings.MONGODB_DB_NAME}", flush=True)
-            return
-        except Exception as err:
-            print(f"[ZapIt DB] MongoDB Atlas unavailable ({err}). Falling back to SQLite...", flush=True)
-            _mongo_client = None
-            _mongo_db = None
-
-    db_dir = os.path.dirname(settings.SQLITE_DB_PATH)
-    if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
-
-    async with aiosqlite.connect(settings.SQLITE_DB_PATH) as db:
-        await db.executescript(
+async def _init_sqlite() -> None:
+    async with aiosqlite.connect(str(SQLITE_PATH)) as db:
+        await db.execute(
             """
             CREATE TABLE IF NOT EXISTS quizzes (
                 quiz_id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                source_text TEXT NOT NULL,
-                difficulty TEXT NOT NULL,
-                provider TEXT NOT NULL,
-                model_label TEXT NOT NULL,
-                host_name TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS questions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                quiz_id TEXT NOT NULL,
-                question_id INTEGER NOT NULL,
-                question TEXT NOT NULL,
-                reference_answer TEXT NOT NULL,
-                max_marks INTEGER NOT NULL,
-                rubric_json TEXT NOT NULL,
-                misconceptions_json TEXT NOT NULL,
-                time_limit INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS game_rooms (
-                game_pin TEXT PRIMARY KEY,
-                quiz_id TEXT NOT NULL,
-                title TEXT NOT NULL DEFAULT 'ZapIt Quiz',
-                status TEXT NOT NULL,
-                bots_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS evaluations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                game_pin TEXT NOT NULL,
-                question_id INTEGER NOT NULL,
-                player_id TEXT NOT NULL,
-                player_name TEXT NOT NULL,
-                student_id TEXT NOT NULL,
-                is_bot INTEGER NOT NULL DEFAULT 0,
-                submitted_answer TEXT NOT NULL,
-                response_time_sec REAL NOT NULL,
-                awarded_marks INTEGER NOT NULL,
-                max_marks INTEGER NOT NULL,
-                round_score INTEGER NOT NULL,
-                micro_tutoring TEXT NOT NULL,
-                evidence_from_source TEXT NOT NULL,
-                model_used TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS remediation_decks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                game_pin TEXT NOT NULL,
-                player_id TEXT NOT NULL,
-                player_name TEXT NOT NULL,
-                deck_json TEXT NOT NULL,
-                model_used TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
+                game_pin TEXT,
+                title TEXT,
+                host_name TEXT,
+                source_text TEXT,
+                difficulty TEXT,
+                provider TEXT,
+                model_label TEXT,
+                questions_json TEXT,
+                created_at TEXT
+            )
             """
         )
-        try:
-            await db.execute("ALTER TABLE game_rooms ADD COLUMN title TEXT NOT NULL DEFAULT 'ZapIt Quiz'")
-        except Exception:
-            pass
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS game_rooms (
+                game_pin TEXT PRIMARY KEY,
+                quiz_id TEXT,
+                title TEXT,
+                difficulty TEXT,
+                model_label TEXT,
+                status TEXT,
+                bots_json TEXT,
+                created_at TEXT
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS evaluations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_pin TEXT,
+                question_id INTEGER,
+                player_id TEXT,
+                player_name TEXT,
+                student_id TEXT,
+                is_bot INTEGER,
+                submitted_answer TEXT,
+                response_time_sec REAL,
+                awarded_marks INTEGER,
+                max_marks INTEGER,
+                round_score INTEGER,
+                micro_tutoring TEXT,
+                evidence_from_source TEXT,
+                model_used TEXT,
+                created_at TEXT
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS remediation_decks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_pin TEXT,
+                player_id TEXT,
+                player_name TEXT,
+                deck_json TEXT,
+                model_used TEXT,
+                created_at TEXT
+            )
+            """
+        )
         await db.commit()
-    print(f"[ZapIt DB] Using local SQLite fallback -> {settings.SQLITE_DB_PATH}", flush=True)
 
 
-async def save_quiz_and_room(
-    quiz_id: str,
+async def init_database() -> None:
+    global _mongo_client, _mongo_db, _use_mongo, _db_status_label
+    await _init_sqlite()
+
+    if MONGO_URI:
+        try:
+            _mongo_client = AsyncIOMotorClient(
+                MONGO_URI,
+                tlsCAFile=certifi.where(),
+                serverSelectionTimeoutMS=5000,
+            )
+            await _mongo_client.admin.command("ping")
+            _mongo_db = _mongo_client[MONGO_DB_NAME]
+            _use_mongo = True
+            _db_status_label = f"MongoDB Atlas ({MONGO_DB_NAME})"
+            return
+        except Exception as err:
+            print(f"[ZapIt DB] MongoDB connection failed, falling back to SQLite: {err}")
+
+    _use_mongo = False
+    _db_status_label = "SQLite Local Fallback"
+
+
+async def save_published_quiz(
     game_pin: str,
     title: str,
+    host_name: str,
     source_text: str,
     difficulty: str,
     provider: str,
     model_label: str,
-    host_name: str,
     questions: List[Dict[str, Any]],
     bots: List[str],
-) -> None:
-    now = _now_iso()
-    if _mongo_db is not None:
-        await _mongo_db.quizzes.insert_one(
-            {
-                "quiz_id": quiz_id,
-                "title": title,
-                "source_text": source_text,
-                "difficulty": difficulty,
-                "provider": provider,
-                "model_label": model_label,
-                "host_name": host_name,
-                "questions": questions,
-                "created_at": now,
-            }
-        )
-        await _mongo_db.game_rooms.insert_one(
-            {
-                "game_pin": game_pin,
-                "quiz_id": quiz_id,
-                "title": title,
-                "difficulty": difficulty,
-                "model_label": model_label,
-                "status": "LOBBY",
-                "bots": bots,
-                "created_at": now,
-            }
-        )
-        return
+) -> str:
+    quiz_id = "qz_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+    created_at = _now_iso()
 
-    async with aiosqlite.connect(settings.SQLITE_DB_PATH) as db:
-        await db.execute(
-            """
-            INSERT INTO quizzes (quiz_id, title, source_text, difficulty, provider, model_label, host_name, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (quiz_id, title, source_text, difficulty, provider, model_label, host_name, now),
-        )
-        for q in questions:
+    quiz_doc = {
+        "quiz_id": quiz_id,
+        "game_pin": game_pin,
+        "title": title,
+        "host_name": host_name,
+        "source_text": source_text,
+        "difficulty": difficulty,
+        "provider": provider,
+        "model_label": model_label,
+        "questions": questions,
+        "created_at": created_at,
+    }
+    room_doc = {
+        "game_pin": game_pin,
+        "quiz_id": quiz_id,
+        "title": title,
+        "difficulty": difficulty,
+        "model_label": model_label,
+        "status": "LOBBY",
+        "bots": bots,
+        "created_at": created_at,
+    }
+
+    if _use_mongo and _mongo_db is not None:
+        await _mongo_db["quizzes"].insert_one(dict(quiz_doc))
+        await _mongo_db["game_rooms"].insert_one(dict(room_doc))
+    else:
+        async with aiosqlite.connect(str(SQLITE_PATH)) as db:
             await db.execute(
                 """
-                INSERT INTO questions (
-                    quiz_id, question_id, question, reference_answer, max_marks,
-                    rubric_json, misconceptions_json, time_limit
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO quizzes (quiz_id, game_pin, title, host_name, source_text, difficulty, provider, model_label, questions_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     quiz_id,
-                    q["question_id"],
-                    q["question"],
-                    q["reference_answer"],
-                    q["max_marks"],
-                    json.dumps(q.get("options", [])),
-                    json.dumps(q.get("option_explanations", [])),
-                    q.get("time_limit", 20),
+                    game_pin,
+                    title,
+                    host_name,
+                    source_text,
+                    difficulty,
+                    provider,
+                    model_label,
+                    json.dumps(questions),
+                    created_at,
                 ),
             )
-        await db.execute(
-            """
-            INSERT OR REPLACE INTO game_rooms (game_pin, quiz_id, title, status, bots_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (game_pin, quiz_id, title, "LOBBY", json.dumps(bots), now),
-        )
-        await db.commit()
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO game_rooms (game_pin, quiz_id, title, difficulty, model_label, status, bots_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    game_pin,
+                    quiz_id,
+                    title,
+                    difficulty,
+                    model_label,
+                    "LOBBY",
+                    json.dumps(bots),
+                    created_at,
+                ),
+            )
+            await db.commit()
+
+    return quiz_id
 
 
 async def update_room_status(game_pin: str, status: str) -> None:
-    if _mongo_db is not None:
-        await _mongo_db.game_rooms.update_one({"game_pin": game_pin}, {"$set": {"status": status}})
-        return
-
-    async with aiosqlite.connect(settings.SQLITE_DB_PATH) as db:
-        await db.execute("UPDATE game_rooms SET status = ? WHERE game_pin = ?", (status, game_pin))
-        await db.commit()
+    if _use_mongo and _mongo_db is not None:
+        await _mongo_db["game_rooms"].update_one(
+            {"game_pin": game_pin},
+            {"$set": {"status": status}},
+        )
+    else:
+        async with aiosqlite.connect(str(SQLITE_PATH)) as db:
+            await db.execute(
+                "UPDATE game_rooms SET status = ? WHERE game_pin = ?",
+                (status, game_pin),
+            )
+            await db.commit()
 
 
 async def save_evaluations_batch(records: List[Dict[str, Any]]) -> None:
     if not records:
         return
-    now = _now_iso()
-    for r in records:
-        r["created_at"] = now
+    created_at = _now_iso()
+    docs = [{**r, "created_at": created_at} for r in records]
 
-    if _mongo_db is not None:
-        await _mongo_db.evaluations.insert_many([dict(r) for r in records])
-        return
-
-    async with aiosqlite.connect(settings.SQLITE_DB_PATH) as db:
-        await db.executemany(
-            """
-            INSERT INTO evaluations (
-                game_pin, question_id, player_id, player_name, student_id, is_bot,
-                submitted_answer, response_time_sec, awarded_marks, max_marks,
-                round_score, micro_tutoring, evidence_from_source, model_used, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    r["game_pin"],
-                    r["question_id"],
-                    r["player_id"],
-                    r["player_name"],
-                    r["student_id"],
-                    1 if r["is_bot"] else 0,
-                    r["submitted_answer"],
-                    r["response_time_sec"],
-                    r["awarded_marks"],
-                    r["max_marks"],
-                    r["round_score"],
-                    r["micro_tutoring"],
-                    r["evidence_from_source"],
-                    r["model_used"],
-                    r["created_at"],
+    if _use_mongo and _mongo_db is not None:
+        await _mongo_db["evaluations"].insert_many([dict(d) for d in docs])
+    else:
+        async with aiosqlite.connect(str(SQLITE_PATH)) as db:
+            await db.executemany(
+                """
+                INSERT INTO evaluations (
+                    game_pin, question_id, player_id, player_name, student_id, is_bot,
+                    submitted_answer, response_time_sec, awarded_marks, max_marks,
+                    round_score, micro_tutoring, evidence_from_source, model_used, created_at
                 )
-                for r in records
-            ],
-        )
-        await db.commit()
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        d["game_pin"],
+                        d["question_id"],
+                        d["player_id"],
+                        d["player_name"],
+                        d["student_id"],
+                        1 if d.get("is_bot") else 0,
+                        d["submitted_answer"],
+                        d["response_time_sec"],
+                        d["awarded_marks"],
+                        d["max_marks"],
+                        d["round_score"],
+                        d["micro_tutoring"],
+                        d["evidence_from_source"],
+                        d["model_used"],
+                        d["created_at"],
+                    )
+                    for d in docs
+                ],
+            )
+            await db.commit()
 
 
 async def save_remediation_deck(
@@ -252,86 +273,78 @@ async def save_remediation_deck(
     deck: Dict[str, Any],
     model_used: str,
 ) -> None:
-    now = _now_iso()
-    if _mongo_db is not None:
-        await _mongo_db.remediation_decks.insert_one(
+    created_at = _now_iso()
+    if _use_mongo and _mongo_db is not None:
+        await _mongo_db["remediation_decks"].insert_one(
             {
                 "game_pin": game_pin,
                 "player_id": player_id,
                 "player_name": player_name,
                 "deck": deck,
                 "model_used": model_used,
-                "created_at": now,
+                "created_at": created_at,
             }
         )
-        return
+    else:
+        async with aiosqlite.connect(str(SQLITE_PATH)) as db:
+            await db.execute(
+                """
+                INSERT INTO remediation_decks (game_pin, player_id, player_name, deck_json, model_used, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (game_pin, player_id, player_name, json.dumps(deck), model_used, created_at),
+            )
+            await db.commit()
 
-    async with aiosqlite.connect(settings.SQLITE_DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO remediation_decks (game_pin, player_id, player_name, deck_json, model_used, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (game_pin, player_id, player_name, json.dumps(deck), model_used, now),
-        )
-        await db.commit()
 
-
-async def list_recent_rooms(limit: int = 15) -> List[Dict[str, Any]]:
-    if _mongo_db is not None:
-        cursor = _mongo_db.game_rooms.find({}, {"_id": 0}).sort("created_at", -1).limit(limit)
+async def get_host_history(limit: int = 25) -> List[Dict[str, Any]]:
+    if _use_mongo and _mongo_db is not None:
+        cursor = _mongo_db["game_rooms"].find({}, {"_id": 0}).sort("created_at", -1).limit(limit)
         return await cursor.to_list(length=limit)
 
-    async with aiosqlite.connect(settings.SQLITE_DB_PATH) as db:
+    async with aiosqlite.connect(str(SQLITE_PATH)) as db:
         db.row_factory = aiosqlite.Row
-        cur = await db.execute(
-            """
-            SELECT r.game_pin, r.quiz_id, r.title, r.status, r.created_at, q.difficulty, q.model_label
-            FROM game_rooms r
-            LEFT JOIN quizzes q ON r.quiz_id = q.quiz_id
-            ORDER BY r.created_at DESC LIMIT ?
-            """,
+        async with db.execute(
+            "SELECT game_pin, quiz_id, title, difficulty, model_label, status, created_at FROM game_rooms ORDER BY created_at DESC LIMIT ?",
             (limit,),
-        )
-        return [dict(row) for row in await cur.fetchall()]
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
 
 
-async def get_match_report(game_pin: str) -> Optional[Dict[str, Any]]:
-    if _mongo_db is not None:
-        room = await _mongo_db.game_rooms.find_one({"game_pin": game_pin}, {"_id": 0})
+async def get_room_report(game_pin: str) -> Optional[Dict[str, Any]]:
+    if _use_mongo and _mongo_db is not None:
+        room = await _mongo_db["game_rooms"].find_one({"game_pin": game_pin}, {"_id": 0})
         if not room:
             return None
-        evals = await _mongo_db.evaluations.find({"game_pin": game_pin}, {"_id": 0}).to_list(length=2000)
-        decks = await _mongo_db.remediation_decks.find({"game_pin": game_pin}, {"_id": 0}).to_list(length=200)
-        return {"storage": "MongoDB Atlas", "room": room, "evaluations": evals, "remediation_decks": decks}
+        evals = await _mongo_db["evaluations"].find({"game_pin": game_pin}, {"_id": 0}).to_list(length=2000)
+        return {
+            "storage": _db_status_label,
+            "room": room,
+            "evaluations": evals,
+        }
 
-    async with aiosqlite.connect(settings.SQLITE_DB_PATH) as db:
+    async with aiosqlite.connect(str(SQLITE_PATH)) as db:
         db.row_factory = aiosqlite.Row
-        cur = await db.execute(
-            """
-            SELECT r.game_pin, r.status, r.created_at, r.title, q.difficulty, q.model_label
-            FROM game_rooms r
-            LEFT JOIN quizzes q ON r.quiz_id = q.quiz_id
-            WHERE r.game_pin = ?
-            """,
+        async with db.execute("SELECT * FROM game_rooms WHERE game_pin = ?", (game_pin,)) as cur:
+            room_row = await cur.fetchone()
+            if not room_row:
+                return None
+            room = dict(room_row)
+
+        async with db.execute(
+            "SELECT * FROM evaluations WHERE game_pin = ? ORDER BY question_id ASC, round_score DESC",
             (game_pin,),
-        )
-        room = await cur.fetchone()
-        if not room:
-            return None
-        ev_cur = await db.execute(
-            "SELECT * FROM evaluations WHERE game_pin = ? ORDER BY question_id, round_score DESC",
-            (game_pin,),
-        )
-        evals = [dict(row) for row in await ev_cur.fetchall()]
-        deck_cur = await db.execute(
-            "SELECT player_id, player_name, deck_json, model_used FROM remediation_decks WHERE game_pin = ?",
-            (game_pin,),
-        )
-        decks = [
-            {
-                "player_id": row["player_id"],
-                "player_name": row["player_name"],
-                "deck": json.loads(row["deck_json"]),
-                "model_used": row["model_used"],
-            }
-            for row in await deck_cur.fetchall()
-        ]
-        return {"storage": "SQLite Local", "room": dict(room), "evaluations": evals, "remediation_decks": decks}
+        ) as cur:
+            eval_rows = await cur.fetchall()
+            evaluations = []
+            for r in eval_rows:
+                item = dict(r)
+                item["is_bot"] = bool(item.get("is_bot"))
+                evaluations.append(item)
+
+        return {
+            "storage": _db_status_label,
+            "room": room,
+            "evaluations": evaluations,
+        }
