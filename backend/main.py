@@ -1,152 +1,87 @@
-import random
-import time
+import os
 import traceback
-import uuid
 from contextlib import asynccontextmanager
-from typing import Literal
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
-from backend.doc_parser import extract_text_from_file
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pathlib import Path
+from typing import Optional
 
-from backend.ai_engine import BOT_PROFILES, evaluate_player_answer, generate_quiz_from_source
+from dotenv import load_dotenv
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+load_dotenv()
+
+from backend.ai_engine import evaluate_player_answer, generate_quiz_from_source
 from backend.database import (
-    get_match_report,
-    init_db,
-    is_mongo_enabled,
-    list_recent_rooms,
-    save_quiz_and_room,
+    get_database_status,
+    get_host_history,
+    get_room_report,
+    init_database,
+    save_published_quiz,
 )
+from backend.doc_parser import extract_text_from_file
 from backend.game_manager import (
-    AVATARS,
     MAX_PARTICIPANTS_PER_ROOM,
-    GameRoom,
-    Participant,
+    add_human_participant,
+    create_room,
+    finalize_current_question,
     finish_round,
-    generate_unique_pin,
+    get_room,
+    is_pin_reserved,
     notify_answer_progress,
-    reserved_pins,
-    rooms,
+    record_answer_submission,
+    reserve_pin,
     start_next_question,
 )
 from backend.llm_router import LLMRouterError, get_model_label
-from backend.schemas import GenerateQuizRequest, ProviderType, PublishQuizRequest
+from backend.schemas import (
+    GenerateQuizRequest,
+    PublishQuizRequest,
+    RedemptionVerifyRequest,
+    ReservePinRequest,
+)
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+STATIC_DIR = BASE_DIR / "static"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_db()
+    await init_database()
     yield
 
 
-app = FastAPI(title="ZapIt — Generative AI Live Quiz Arena", lifespan=lifespan)
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app = FastAPI(title="ZapIt — AI Live Assessment Platform", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
-@app.middleware("http")
-async def disable_static_cache(request: Request, call_next):
-    response = await call_next(request)
-    if request.url.path.startswith("/static/"):
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-    return response
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal Server Error: {type(exc).__name__}: {exc}"},
+    )
 
 
-class ReservePinRequest(BaseModel):
-    provider: ProviderType = "ollama"
-    question_count: Literal[5, 10, 15] = 5
+# ----------------- HTML PORTALS -----------------
 
-
-class RedemptionVerifyRequest(BaseModel):
-    provider: ProviderType
-    question: str
-    reference_answer: str
-    student_answer: str
-
-
-# --- SEPARATE ENTRY PAGES FOR PARTICIPANTS VS HOST ---
 @app.get("/")
-@app.get("/play")
-async def serve_participant_page():
-    return FileResponse("static/play.html")
+async def serve_participant_portal():
+    return FileResponse(str(STATIC_DIR / "play.html"))
 
 
 @app.get("/host")
-async def serve_host_page():
-    return FileResponse("static/host.html")
+async def serve_host_studio():
+    return FileResponse(str(STATIC_DIR / "host.html"))
 
+
+# ----------------- SYSTEM & DOCUMENT EXTRACTION -----------------
 
 @app.get("/api/system/status")
 async def api_system_status():
-    return {
-        "app": "ZapIt",
-        "database": "MongoDB Atlas" if is_mongo_enabled() else "SQLite Local Fallback",
-    }
+    return get_database_status()
 
-
-@app.get("/api/rooms/{pin}/check")
-async def api_check_room(pin: str):
-    clean_pin = pin.strip()
-    room = rooms.get(clean_pin)
-    if not room:
-        raise HTTPException(
-            status_code=404,
-            detail="Quiz PIN not found. Make sure you entered the exact 6-digit PIN from the host's screen.",
-        )
-    if room.status == "PODIUM":
-        raise HTTPException(status_code=403, detail="This quiz match has already ended.")
-    if len(room.participants) >= MAX_PARTICIPANTS_PER_ROOM:
-        raise HTTPException(status_code=403, detail="This quiz room has reached maximum capacity.")
-    return {"ok": True, "title": room.title, "status": room.status}
-
-
-@app.get("/api/rooms/{pin}/state")
-async def api_participant_room_state(pin: str):
-    """Safe state snapshot for participants (no standings exposed before PODIUM)."""
-    room = rooms.get(pin.strip())
-    if not room:
-        raise HTTPException(status_code=404, detail="Room not found")
-
-    if room.status == "QUESTION" and 0 <= room.current_idx < len(room.questions):
-        q = room.questions[room.current_idx]
-        duration = int(q.get("time_limit", 20))
-        rem = max(1, duration - int(time.time() - room.question_start_time))
-        return {
-            "status": "QUESTION",
-            "question_number": room.current_idx + 1,
-            "total_questions": len(room.questions),
-            "question": q["question"],
-            "options": q["options"],
-            "max_marks": q["max_marks"],
-            "time_limit": rem,
-            "total_participants": len(room.participants),
-        }
-
-    return {"status": room.status}
-
-
-@app.post("/api/rooms/reserve")
-async def api_reserve_pin(req: ReservePinRequest):
-    pin = generate_unique_pin()
-    staging_room = GameRoom(
-        pin=pin,
-        quiz_id="preparing",
-        title="Preparing Quiz...",
-        source_text="",
-        provider=req.provider,
-        questions=[],
-        bots=[],
-    )
-    staging_room.status = "PREPARING"
-    rooms[pin] = staging_room
-
-    est_seconds = (3 + req.question_count) if req.provider == "gemini" else (6 + req.question_count * 2)
-    return {
-        "game_pin": pin,
-        "estimated_seconds": est_seconds,
-        "model_label": get_model_label(req.provider),
-    }
 
 @app.post("/api/documents/extract")
 async def api_extract_document(file: UploadFile = File(...)):
@@ -172,6 +107,16 @@ async def api_extract_document(file: UploadFile = File(...)):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to read file: {err}")
 
+
+# ----------------- HOST QUIZ AUTHORING & LOBBY -----------------
+
+@app.post("/api/rooms/reserve")
+async def api_reserve_pin(req: ReservePinRequest):
+    pin = reserve_pin()
+    est_sec = max(6, req.question_count * (2 if req.provider == "gemini" else 4))
+    return {"game_pin": pin, "estimated_seconds": est_sec}
+
+
 @app.post("/api/quizzes/generate")
 async def api_generate_quiz(req: GenerateQuizRequest):
     try:
@@ -196,109 +141,160 @@ async def api_generate_quiz(req: GenerateQuizRequest):
 
 @app.post("/api/quizzes/publish")
 async def api_publish_quiz(req: PublishQuizRequest):
-    if not req.questions:
-        raise HTTPException(status_code=400, detail="At least one question is required to publish.")
-
-    quiz_id = f"qz_{uuid.uuid4().hex[:8]}"
-    pin = req.reserved_pin if (req.reserved_pin and req.reserved_pin in rooms) else generate_unique_pin()
-    reserved_pins.discard(pin)
-
-    model_label = get_model_label(req.provider)
-    questions_dicts = [q.model_dump() for q in req.questions]
-
-    await save_quiz_and_room(
-        quiz_id=quiz_id,
-        game_pin=pin,
-        title=req.title,
-        source_text=req.source_text,
-        difficulty=req.difficulty,
-        provider=req.provider,
-        model_label=model_label,
-        host_name=req.host_name,
-        questions=questions_dicts,
-        bots=req.bots,
-    )
-
-    existing = rooms.get(pin)
-    if existing:
-        existing.quiz_id = quiz_id
-        existing.title = req.title
-        existing.source_text = req.source_text
-        existing.provider = req.provider
-        existing.model_label = model_label
-        existing.questions = questions_dicts
-        existing.status = "LOBBY"
-        for idx, persona in enumerate(req.bots, start=1):
-            profile = BOT_PROFILES[persona]
-            bot_id = f"bot_{persona}_{idx}"
-            if bot_id not in existing.participants:
-                existing.participants[bot_id] = Participant(
-                    player_id=bot_id,
-                    name=profile["name"],
-                    student_id=profile["student_id"],
-                    avatar=profile["avatar"],
-                    is_bot=True,
-                    persona=persona,
-                )
-    else:
-        rooms[pin] = GameRoom(
-            pin=pin,
-            quiz_id=quiz_id,
+    try:
+        model_label = get_model_label(req.provider)
+        questions_dicts = [q.model_dump() for q in req.questions]
+        room = create_room(
+            quiz_id="",
             title=req.title,
             source_text=req.source_text,
+            difficulty=req.difficulty,
             provider=req.provider,
+            model_label=model_label,
+            questions=questions_dicts,
+            bots=req.bots,
+            reserved_pin=req.reserved_pin,
+        )
+        quiz_id = await save_published_quiz(
+            game_pin=room.pin,
+            title=req.title,
+            host_name=req.host_name,
+            source_text=req.source_text,
+            difficulty=req.difficulty,
+            provider=req.provider,
+            model_label=model_label,
             questions=questions_dicts,
             bots=req.bots,
         )
+        room.quiz_id = quiz_id
+        return {"game_pin": room.pin, "quiz_id": quiz_id}
+    except Exception as err:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to publish quiz: {err}")
 
-    return {"quiz_id": quiz_id, "game_pin": pin, "model_label": model_label}
+
+# ----------------- PARTICIPANT JOIN CHECK & STATE SYNC -----------------
+
+@app.get("/api/rooms/{pin}/check")
+async def api_check_room(pin: str):
+    clean_pin = (pin or "").strip()
+    room = get_room(clean_pin)
+    if room:
+        if len(room.participants) >= MAX_PARTICIPANTS_PER_ROOM:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Room {clean_pin} has reached maximum capacity ({MAX_PARTICIPANTS_PER_ROOM} participants).",
+            )
+        return {
+            "exists": True,
+            "status": room.status,
+            "title": room.title,
+            "participant_count": len(room.participants),
+        }
+    if is_pin_reserved(clean_pin):
+        return {
+            "exists": True,
+            "status": "PREPARING",
+            "title": "Quiz is being prepared by Host...",
+            "participant_count": 0,
+        }
+    raise HTTPException(status_code=404, detail=f"No active quiz room found with PIN {clean_pin}.")
+
+
+@app.get("/api/rooms/{pin}/state")
+async def api_room_state_sync(pin: str, player_id: Optional[str] = Query(default=None)):
+    room = get_room(pin)
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found.")
+
+    base = {
+        "status": room.status,
+        "title": room.title,
+        "question_number": room.current_index + 1,
+        "total_questions": len(room.questions),
+    }
+
+    if room.status == "IN_PROGRESS" and 0 <= room.current_index < len(room.questions):
+        q = room.questions[room.current_index]
+        time_limit = int(q.get("time_limit", 20))
+        elapsed = time.monotonic() - room.question_started_at
+        remaining = max(0, int(round(time_limit - elapsed)))
+        base.update(
+            {
+                "question_id": q["question_id"],
+                "question": q["question"],
+                "options": q.get("options", []),
+                "max_marks": q["max_marks"],
+                "time_limit": time_limit,
+                "remaining": remaining,
+                "already_submitted": bool(player_id and player_id in room.current_submissions),
+            }
+        )
+    elif room.status == "COMPLETED":
+        base["leaderboard"] = room.get_leaderboard()
+
+    return base
 
 
 @app.post("/api/redemption/verify")
 async def api_verify_redemption(req: RedemptionVerifyRequest):
-    q_stub = {
+    room = get_room(req.game_pin)
+    source_text = room.source_text if room else ""
+    provider = room.provider if room else "gemini"
+    question_dict = {
         "question": req.question,
         "reference_answer": req.reference_answer,
-        "max_marks": 2,
     }
-    eval_res, model_label = await evaluate_player_answer(
-        provider=req.provider,
-        source_text=req.reference_answer,
-        question=q_stub,
-        submitted_answer=req.student_answer,
-    )
-    return {"evaluation": eval_res.model_dump(), "model_label": model_label}
+    try:
+        res, model_label = await evaluate_player_answer(
+            provider=provider,
+            source_text=source_text,
+            question=question_dict,
+            submitted_answer=req.student_answer,
+        )
+        return {
+            "is_correct": res.is_correct,
+            "awarded_marks": res.awarded_marks,
+            "micro_tutoring": res.micro_tutoring,
+            "model_used": model_label,
+        }
+    except Exception as err:
+        raise HTTPException(status_code=500, detail=str(err))
 
 
-# --- HOST-ONLY HISTORY & REPORT ENDPOINTS ---
+# ----------------- HOST HISTORY & REPORTS -----------------
+
 @app.get("/api/host/history")
 async def api_host_history():
-    return {"sessions": await list_recent_rooms(limit=20)}
+    sessions = await get_host_history(limit=25)
+    return {"sessions": sessions}
 
 
-@app.get("/api/host/reports/{game_pin}")
-async def api_get_report(game_pin: str):
-    report = await get_match_report(game_pin.strip())
+@app.get("/api/host/reports/{pin}")
+async def api_host_report(pin: str):
+    report = await get_room_report(pin)
     if not report:
-        raise HTTPException(status_code=404, detail="No saved match report found for that Quiz PIN.")
+        raise HTTPException(status_code=404, detail="Match report not found.")
     return report
 
 
-# --- WEBSOCKETS ---
+# ----------------- WEBSOCKETS (HOST & PARTICIPANT) -----------------
+
 @app.websocket("/ws/{pin}/host")
-async def host_websocket(websocket: WebSocket, pin: str):
+async def ws_host_endpoint(websocket: WebSocket, pin: str):
     await websocket.accept()
-    room = rooms.get(pin)
+    room = get_room(pin)
     if not room:
-        await websocket.close(code=4004)
+        await websocket.send_json({"type": "ERROR", "detail": "Room not found."})
+        await websocket.close()
         return
+
     room.host_ws = websocket
     await websocket.send_json(
         {
             "type": "LOBBY_UPDATE",
-            "players": room.get_leaderboard(),
-            "title": room.title,
-            "model_label": room.model_label,
+            "players": room.get_public_players(),
+            "status": room.status,
         }
     )
 
@@ -308,97 +304,88 @@ async def host_websocket(websocket: WebSocket, pin: str):
             action = data.get("action")
             if action == "START_GAME" and room.status == "LOBBY":
                 await start_next_question(room)
-            elif action == "END_QUESTION" and room.status == "QUESTION":
+            elif action == "END_QUESTION" and room.status == "IN_PROGRESS":
                 await finish_round(room)
-            elif action == "NEXT_QUESTION" and room.status == "ROUND_RESULT":
+            elif action == "NEXT_QUESTION" and room.status == "ROUND_REVIEW":
                 await start_next_question(room)
     except WebSocketDisconnect:
-        room.host_ws = None
+        if room.host_ws == websocket:
+            room.host_ws = None
+    except Exception:
+        if room.host_ws == websocket:
+            room.host_ws = None
 
 
 @app.websocket("/ws/{pin}/player")
-async def player_websocket(websocket: WebSocket, pin: str, name: str = "Student", student_id: str = "ID-00"):
+async def ws_player_endpoint(
+    websocket: WebSocket,
+    pin: str,
+    name: str = Query(default="Player"),
+    student_id: str = Query(default="STU-000"),
+):
     await websocket.accept()
-
-    room = rooms.get(pin)
-    if not room or room.status == "PODIUM":
-        await websocket.close(code=4003)
-        return
-    if len(room.participants) >= MAX_PARTICIPANTS_PER_ROOM:
-        await websocket.close(code=4006)
+    room = get_room(pin)
+    if not room:
+        await websocket.send_json({"type": "ERROR", "detail": f"Quiz room {pin} not found."})
+        await websocket.close()
         return
 
-    player_id = f"p_{random.randint(100000, 999999)}"
-    avatar = AVATARS[len(room.participants) % len(AVATARS)]
-    participant = Participant(
-        player_id=player_id,
-        name=name.strip()[:24] or "Student",
-        student_id=student_id.strip()[:24] or "ID-00",
-        avatar=avatar,
-        is_bot=False,
-        ws=websocket,
-    )
-    room.participants[player_id] = participant
+    try:
+        participant = add_human_participant(room, name=name, student_id=student_id, ws=websocket)
+    except ValueError as cap_err:
+        await websocket.send_json({"type": "ERROR", "detail": str(cap_err)})
+        await websocket.close()
+        return
 
     await websocket.send_json(
         {
-            "type": "JOINED",
-            "player_id": player_id,
-            "avatar": avatar,
+            "type": "JOINED_OK",
+            "player_id": participant.player_id,
+            "name": participant.name,
+            "student_id": participant.student_id,
+            "avatar": participant.avatar,
             "title": room.title,
-            "model_label": room.model_label,
-            "provider": room.provider,
+            "status": room.status,
         }
     )
 
-    if room.status == "QUESTION" and 0 <= room.current_idx < len(room.questions):
-        q = room.questions[room.current_idx]
-        duration = int(q.get("time_limit", 20))
-        rem = max(1, duration - int(time.time() - room.question_start_time))
+    await room.broadcast_to_all(
+        {
+            "type": "LOBBY_UPDATE",
+            "players": room.get_public_players(),
+            "status": room.status,
+        }
+    )
+
+    # If a student joins mid-question, immediately sync the active question to them
+    if room.status == "IN_PROGRESS" and 0 <= room.current_index < len(room.questions):
+        q = room.questions[room.current_index]
+        time_limit = int(q.get("time_limit", 20))
+        elapsed = time.monotonic() - room.question_started_at
+        remaining = max(1, int(round(time_limit - elapsed)))
         await websocket.send_json(
             {
                 "type": "QUESTION_START",
-                "question_number": room.current_idx + 1,
+                "question_number": room.current_index + 1,
                 "total_questions": len(room.questions),
+                "question_id": q["question_id"],
                 "question": q["question"],
-                "options": q["options"],
+                "options": q.get("options", []),
                 "max_marks": q["max_marks"],
-                "time_limit": rem,
+                "time_limit": remaining,
                 "total_participants": len(room.participants),
             }
         )
 
-    if room.host_ws:
-        await GameRoom._safe_send(room.host_ws, {"type": "LOBBY_UPDATE", "players": room.get_leaderboard()})
-
     try:
         while True:
             data = await websocket.receive_json()
-            action = data.get("action")
-            if action == "SUBMIT_ANSWER" and room.status == "QUESTION":
-                if participant.selected_option is None:
-                    opt_idx = int(data.get("option_index", -1))
-                    if 0 <= opt_idx <= 3:
-                        participant.selected_option = opt_idx
-                        participant.response_time = round(time.time() - room.question_start_time, 2)
-                        await notify_answer_progress(room)
-            elif action == "SYNC_STATE" and room.status == "QUESTION" and 0 <= room.current_idx < len(room.questions):
-                q = room.questions[room.current_idx]
-                duration = int(q.get("time_limit", 20))
-                rem = max(1, duration - int(time.time() - room.question_start_time))
-                await websocket.send_json(
-                    {
-                        "type": "QUESTION_START",
-                        "question_number": room.current_idx + 1,
-                        "total_questions": len(room.questions),
-                        "question": q["question"],
-                        "options": q["options"],
-                        "max_marks": q["max_marks"],
-                        "time_limit": rem,
-                        "total_participants": len(room.participants),
-                    }
-                )
+            if data.get("action") == "SUBMIT_ANSWER":
+                sel_idx = int(data.get("selected_option_index", -1))
+                accepted = await record_answer_submission(room, participant.player_id, sel_idx)
+                if accepted:
+                    await websocket.send_json({"type": "ANSWER_LOCKED"})
     except WebSocketDisconnect:
-        room.participants.pop(player_id, None)
-        if room.host_ws:
-            await GameRoom._safe_send(room.host_ws, {"type": "LOBBY_UPDATE", "players": room.get_leaderboard()})
+        participant.ws = None
+    except Exception:
+        participant.ws = None

@@ -236,7 +236,6 @@ def _build_topic_heatmap(room: GameRoom) -> List[Dict[str, Any]]:
             }
         )
 
-    # Sort weakest (lowest accuracy) first so the host immediately sees what to re-teach
     heatmap.sort(key=lambda item: (item["accuracy_pct"], item["question_number"]))
     return heatmap
 
@@ -277,6 +276,16 @@ def _cancel_task(task: Optional[asyncio.Task]) -> None:
         task.cancel()
 
 
+async def notify_answer_progress(room: GameRoom) -> None:
+    await room.broadcast_to_all(
+        {
+            "type": "ANSWER_COUNT",
+            "answered": len(room.current_submissions),
+            "total": len(room.participants),
+        }
+    )
+
+
 async def start_next_question(room: GameRoom) -> None:
     _cancel_task(room.timer_task)
     _cancel_task(room.auto_next_task)
@@ -293,7 +302,6 @@ async def start_next_question(room: GameRoom) -> None:
         lb = room.get_leaderboard()
         heatmap = _build_topic_heatmap(room)
 
-        # Send PODIUM + Weakest Topic Heatmap exclusively to the Host
         if room.host_ws:
             await GameRoom._safe_send(
                 room.host_ws,
@@ -304,7 +312,6 @@ async def start_next_question(room: GameRoom) -> None:
                 },
             )
 
-        # Send standard PODIUM to participants (host-only heatmap excluded)
         for p in list(room.participants.values()):
             if p.ws:
                 await GameRoom._safe_send(p.ws, {"type": "PODIUM", "leaderboard": lb})
@@ -392,13 +399,7 @@ async def record_answer_submission(
         "response_time_sec": elapsed,
     }
 
-    await room.broadcast_to_all(
-        {
-            "type": "ANSWER_COUNT",
-            "answered": len(room.current_submissions),
-            "total": len(room.participants),
-        }
-    )
+    await notify_answer_progress(room)
 
     if len(room.participants) > 0 and len(room.current_submissions) >= len(room.participants):
         _cancel_task(room.timer_task)
@@ -520,7 +521,6 @@ async def finalize_current_question(room: GameRoom) -> None:
         assert chosen_bot.bot_persona is not None
         bot_banter = await generate_bot_banter(room.provider, chosen_bot.bot_persona, top_summary)
 
-    # Host receives full leaderboard, breakdown, and reference answer
     await room.send_to_host(
         {
             "type": "ROUND_RESULT",
@@ -535,7 +535,6 @@ async def finalize_current_question(room: GameRoom) -> None:
         }
     )
 
-    # Participants receive only their personal feedback (no mid-game leaderboard)
     for p in list(room.participants.values()):
         if p.ws:
             await GameRoom._safe_send(
@@ -554,6 +553,10 @@ async def finalize_current_question(room: GameRoom) -> None:
             )
 
     room.auto_next_task = asyncio.create_task(_auto_advance_after_review(room, ROUND_REVIEW_SECONDS))
+
+
+# Backward-compatible alias
+finish_round = finalize_current_question
 
 
 async def _auto_advance_after_review(room: GameRoom, delay_seconds: int) -> None:
@@ -598,5 +601,3 @@ async def _build_and_send_remediation(
     except Exception as err:
         if player.ws:
             await GameRoom._safe_send(player.ws, {"type": "REMEDIATION_ERROR", "detail": str(err)})
-
-finish_round = finalize_current_question
