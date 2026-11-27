@@ -24,10 +24,8 @@ from backend.database import (
     get_database_status,
     get_host_by_email,
     get_host_history,
-    get_host_login_logs,
     get_room_report,
     init_database,
-    record_host_login_log,
     save_published_quiz,
     update_host_last_login,
 )
@@ -36,11 +34,9 @@ from backend.game_manager import (
     MAX_PARTICIPANTS_PER_ROOM,
     add_human_participant,
     create_room,
-    finalize_current_question,
     finish_round,
     get_room,
     is_pin_reserved,
-    notify_answer_progress,
     record_answer_submission,
     reserve_pin,
     start_next_question,
@@ -58,13 +54,6 @@ from backend.schemas import (
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = BASE_DIR / "static"
 EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-
-
-def _extract_client_meta(request: Request) -> tuple[str, str]:
-    forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-    ip_addr = forwarded or (request.client.host if request.client else "unknown")
-    user_agent = request.headers.get("user-agent", "unknown")
-    return ip_addr, user_agent
 
 
 @asynccontextmanager
@@ -106,7 +95,7 @@ async def api_system_status():
 
 
 @app.post("/api/auth/register")
-async def api_host_register(req: HostRegisterRequest, request: Request):
+async def api_host_register(req: HostRegisterRequest):
     clean_email = req.email.strip().lower()
     if not EMAIL_REGEX.match(clean_email):
         raise HTTPException(status_code=400, detail="Please enter a valid email address.")
@@ -115,17 +104,8 @@ async def api_host_register(req: HostRegisterRequest, request: Request):
     if existing:
         raise HTTPException(status_code=409, detail="An account with this email already exists. Please Sign In.")
 
-    ip_addr, user_agent = _extract_client_meta(request)
     pw_hash = hash_password(req.password)
     host = await create_host_account(email=clean_email, name=req.name.strip(), password_hash=pw_hash)
-    await record_host_login_log(
-        email=host["email"],
-        name=host["name"],
-        event_type="REGISTER",
-        success=True,
-        ip_address=ip_addr,
-        user_agent=user_agent,
-    )
     token = create_session_token(email=host["email"], name=host["name"])
     return {
         "token": token,
@@ -134,31 +114,14 @@ async def api_host_register(req: HostRegisterRequest, request: Request):
 
 
 @app.post("/api/auth/login")
-async def api_host_login(req: HostLoginRequest, request: Request):
+async def api_host_login(req: HostLoginRequest):
     clean_email = req.email.strip().lower()
-    ip_addr, user_agent = _extract_client_meta(request)
     host = await get_host_by_email(clean_email)
 
     if not host or not verify_password(req.password, host.get("password_hash", "")):
-        await record_host_login_log(
-            email=clean_email,
-            name=host.get("name", "Unknown") if host else "Unregistered",
-            event_type="LOGIN_FAILED",
-            success=False,
-            ip_address=ip_addr,
-            user_agent=user_agent,
-        )
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
     await update_host_last_login(clean_email)
-    await record_host_login_log(
-        email=host["email"],
-        name=host["name"],
-        event_type="LOGIN_SUCCESS",
-        success=True,
-        ip_address=ip_addr,
-        user_agent=user_agent,
-    )
     token = create_session_token(email=host["email"], name=host["name"])
     return {
         "token": token,
@@ -169,12 +132,6 @@ async def api_host_login(req: HostLoginRequest, request: Request):
 @app.get("/api/auth/me")
 async def api_host_me(host: Dict[str, Any] = Depends(require_host_auth)):
     return {"host": {"email": host["email"], "name": host["name"]}}
-
-
-@app.get("/api/auth/logs")
-async def api_host_login_logs(host: Dict[str, Any] = Depends(require_host_auth)):
-    logs = await get_host_login_logs(email=host["email"], limit=25)
-    return {"logs": logs}
 
 
 # ----------------- DOCUMENT EXTRACTION (PROTECTED) -----------------

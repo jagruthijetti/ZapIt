@@ -144,7 +144,6 @@ function onHostAuthenticated(host) {
   if (welcomeTag) welcomeTag.innerText = `Welcome, ${host.name}`;
   if (hostNameInput && host.name) hostNameInput.value = host.name;
 
-  // Navigate directly to Create Quiz / Check Match History chooser
   showView("view-home");
 }
 
@@ -179,47 +178,6 @@ function navigateHostHome() {
     showView("view-auth");
   } else {
     showView("view-home");
-  }
-}
-
-async function openLoginLogsModal() {
-  if (!currentHost) {
-    showView("view-auth");
-    return;
-  }
-  const modal = document.getElementById("logs-modal");
-  const body = document.getElementById("logs-modal-body");
-  if (!modal || !body) return;
-  body.innerHTML = `<p class="text-xs text-zinc-400 animate-pulse">Loading login audit logs...</p>`;
-  modal.classList.remove("hidden");
-
-  try {
-    const data = await safeFetchJson("/api/auth/logs");
-    const logs = data.logs || [];
-    body.innerHTML = logs.length
-      ? logs
-          .map(
-            (l) => `
-            <div class="p-3 rounded-xl bg-zinc-900 border ${
-              l.success ? "border-emerald-500/30" : "border-rose-500/30"
-            } text-xs space-y-1">
-              <div class="flex items-center justify-between">
-                <span class="font-bold ${l.success ? "text-emerald-400" : "text-rose-400"}">
-                  ${escapeHtml(l.event_type)}
-                </span>
-                <span class="text-zinc-400 font-mono">${escapeHtml(l.created_at)}</span>
-              </div>
-              <div class="text-zinc-300">
-                Email: <strong>${escapeHtml(l.email)}</strong> • IP: <span class="font-mono">${escapeHtml(l.ip_address)}</span>
-              </div>
-              <div class="text-[11px] text-zinc-500 truncate">${escapeHtml(l.user_agent)}</div>
-            </div>
-          `
-          )
-          .join("")
-      : `<p class="text-xs text-zinc-500">No login records found yet.</p>`;
-  } catch (err) {
-    body.innerHTML = `<p class="text-xs text-rose-400">Error loading logs: ${escapeHtml(err.message)}</p>`;
   }
 }
 
@@ -841,14 +799,12 @@ function escapeHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
-// Expose handlers globally for inline dynamic HTML calls
 window.switchAuthTab = switchAuthTab;
 window.submitHostAuth = submitHostAuth;
 window.logoutHost = logoutHost;
 window.navigateHostHome = navigateHostHome;
 window.openCreateView = openCreateView;
 window.openHistoryView = openHistoryView;
-window.openLoginLogsModal = openLoginLogsModal;
 window.showView = showView;
 window.removeStudioQuestion = removeStudioQuestion;
 window.renderStudioQuestions = renderStudioQuestions;
@@ -862,7 +818,6 @@ function bindHostEventListeners() {
 
   document.getElementById("nav-btn-create")?.addEventListener("click", openCreateView);
   document.getElementById("nav-btn-history")?.addEventListener("click", openHistoryView);
-  document.getElementById("nav-btn-logs")?.addEventListener("click", openLoginLogsModal);
   document.getElementById("nav-btn-logout")?.addEventListener("click", logoutHost);
 
   document.getElementById("hub-btn-create")?.addEventListener("click", openCreateView);
@@ -895,9 +850,6 @@ function bindHostEventListeners() {
 
   document.getElementById("close-report-modal-btn")?.addEventListener("click", () => {
     document.getElementById("report-modal")?.classList.add("hidden");
-  });
-  document.getElementById("close-logs-modal-btn")?.addEventListener("click", () => {
-    document.getElementById("logs-modal")?.classList.add("hidden");
   });
 }
 

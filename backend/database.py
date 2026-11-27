@@ -10,9 +10,6 @@ import aiosqlite
 import certifi
 from motor.motor_asyncio import AsyncIOMotorClient
 
-MONGO_URI = os.getenv("MONGO_URI", "").strip()
-MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "zapit_db").strip() or "zapit_db"
-
 BASE_DIR = Path(__file__).resolve().parent.parent
 SQLITE_PATH = BASE_DIR / "zapit_local.db"
 
@@ -20,6 +17,7 @@ _mongo_client: Optional[AsyncIOMotorClient] = None
 _mongo_db = None
 _use_mongo = False
 _db_status_label = "Initializing..."
+_active_db_name = "zapit_db"
 
 
 def _now_iso() -> str:
@@ -30,7 +28,7 @@ def get_database_status() -> Dict[str, Any]:
     return {
         "database": _db_status_label,
         "using_mongo": _use_mongo,
-        "db_name": MONGO_DB_NAME if _use_mongo else SQLITE_PATH.name,
+        "db_name": _active_db_name if _use_mongo else SQLITE_PATH.name,
     }
 
 
@@ -45,20 +43,6 @@ async def _init_sqlite() -> None:
                 login_count INTEGER DEFAULT 1,
                 created_at TEXT,
                 last_login TEXT
-            )
-            """
-        )
-        await db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS host_login_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT,
-                name TEXT,
-                event_type TEXT,
-                success INTEGER,
-                ip_address TEXT,
-                user_agent TEXT,
-                created_at TEXT
             )
             """
         )
@@ -142,29 +126,36 @@ async def _init_sqlite() -> None:
 
 
 async def init_database() -> None:
-    global _mongo_client, _mongo_db, _use_mongo, _db_status_label
+    global _mongo_client, _mongo_db, _use_mongo, _db_status_label, _active_db_name
     await _init_sqlite()
 
-    if MONGO_URI:
-        try:
-            _mongo_client = AsyncIOMotorClient(
-                MONGO_URI,
-                tlsCAFile=certifi.where(),
-                serverSelectionTimeoutMS=5000,
-            )
-            await _mongo_client.admin.command("ping")
-            _mongo_db = _mongo_client[MONGO_DB_NAME]
-            _use_mongo = True
-            _db_status_label = f"MongoDB Atlas ({MONGO_DB_NAME})"
-            return
-        except Exception as err:
-            print(f"[ZapIt DB] MongoDB connection failed, falling back to SQLite: {err}")
+    mongo_uri = (os.getenv("MONGO_URI") or os.getenv("MONGODB_URI") or "").strip()
+    _active_db_name = (os.getenv("MONGO_DB_NAME") or "zapit_db").strip() or "zapit_db"
 
-    _use_mongo = False
-    _db_status_label = "SQLite Local Fallback"
+    if not mongo_uri:
+        _use_mongo = False
+        _db_status_label = "SQLite (MONGO_URI not set)"
+        return
+
+    try:
+        _mongo_client = AsyncIOMotorClient(
+            mongo_uri,
+            tlsCAFile=certifi.where(),
+            serverSelectionTimeoutMS=8000,
+        )
+        await _mongo_client.admin.command("ping")
+        _mongo_db = _mongo_client[_active_db_name]
+        _use_mongo = True
+        _db_status_label = f"MongoDB Atlas ({_active_db_name})"
+        print(f"[ZapIt DB] Connected to MongoDB Atlas database '{_active_db_name}'")
+    except Exception as err:
+        _use_mongo = False
+        short_err = type(err).__name__
+        _db_status_label = f"SQLite (Atlas {short_err})"
+        print(f"[ZapIt DB] MongoDB connection failed, falling back to SQLite: {err}")
 
 
-# ----------------- HOST ACCOUNTS & LOGIN AUDIT LOGS -----------------
+# ----------------- HOST ACCOUNTS -----------------
 
 async def get_host_by_email(email: str) -> Optional[Dict[str, Any]]:
     clean_email = email.strip().lower()
@@ -222,74 +213,6 @@ async def update_host_last_login(email: str) -> None:
                 (now, clean_email),
             )
             await db.commit()
-
-
-async def record_host_login_log(
-    email: str,
-    name: str,
-    event_type: str,  # "REGISTER" | "LOGIN_SUCCESS" | "LOGIN_FAILED"
-    success: bool,
-    ip_address: str = "unknown",
-    user_agent: str = "unknown",
-) -> None:
-    clean_email = email.strip().lower()
-    now = _now_iso()
-    log_doc = {
-        "email": clean_email,
-        "name": name.strip() or "Unknown",
-        "event_type": event_type,
-        "success": success,
-        "ip_address": ip_address[:64],
-        "user_agent": user_agent[:240],
-        "created_at": now,
-    }
-
-    if _use_mongo and _mongo_db is not None:
-        await _mongo_db["host_login_logs"].insert_one(dict(log_doc))
-    else:
-        async with aiosqlite.connect(str(SQLITE_PATH)) as db:
-            await db.execute(
-                """
-                INSERT INTO host_login_logs (email, name, event_type, success, ip_address, user_agent, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    log_doc["email"],
-                    log_doc["name"],
-                    log_doc["event_type"],
-                    1 if success else 0,
-                    log_doc["ip_address"],
-                    log_doc["user_agent"],
-                    now,
-                ),
-            )
-            await db.commit()
-
-
-async def get_host_login_logs(email: str, limit: int = 25) -> List[Dict[str, Any]]:
-    clean_email = email.strip().lower()
-    if _use_mongo and _mongo_db is not None:
-        cursor = (
-            _mongo_db["host_login_logs"]
-            .find({"email": clean_email}, {"_id": 0})
-            .sort("created_at", -1)
-            .limit(limit)
-        )
-        return await cursor.to_list(length=limit)
-
-    async with aiosqlite.connect(str(SQLITE_PATH)) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT email, name, event_type, success, ip_address, user_agent, created_at FROM host_login_logs WHERE email = ? ORDER BY id DESC LIMIT ?",
-            (clean_email, limit),
-        ) as cur:
-            rows = await cur.fetchall()
-            out = []
-            for r in rows:
-                d = dict(r)
-                d["success"] = bool(d.get("success"))
-                out.append(d)
-            return out
 
 
 # ----------------- QUIZZES, ROOMS & EVALUATIONS -----------------

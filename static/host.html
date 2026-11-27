@@ -24,7 +24,6 @@
     </div>
 
     <div class="flex items-center gap-2 sm:gap-3">
-      <!-- Navigation controls shown ONLY after Host signs in -->
       <div id="host-auth-nav" class="hidden flex items-center gap-2 sm:gap-3">
         <button id="nav-btn-create" type="button"
           class="px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-xs text-zinc-200 hover:border-violet-500/60 transition font-medium">
@@ -33,10 +32,6 @@
         <button id="nav-btn-history" type="button"
           class="px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-xs text-zinc-200 hover:border-cyan-500/60 transition font-medium">
           📊 Match History
-        </button>
-        <button id="nav-btn-logs" type="button"
-          class="px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-xs text-zinc-200 hover:border-emerald-500/60 transition font-medium">
-          🔐 Login Logs
         </button>
         <span id="host-user-badge" class="hidden xl:inline-block text-xs px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 font-medium">
           👩‍🏫 Instructor
@@ -58,7 +53,7 @@
 
   <main class="flex-1 flex items-center justify-center p-4 sm:p-8">
 
-    <!-- STEP 1 (DEFAULT VISIBLE): HOST / TEACHER SIGN IN & SIGN UP -->
+    <!-- STEP 1: HOST / TEACHER SIGN IN & SIGN UP -->
     <section id="view-auth" class="w-full max-w-md glass rounded-3xl p-8 space-y-6">
       <div class="text-center space-y-1.5">
         <span class="text-xs font-semibold uppercase tracking-widest text-cyan-400">Host Authentication</span>
@@ -106,7 +101,7 @@
       </form>
     </section>
 
-    <!-- STEP 2 (AFTER AUTH): HOST ACTION HUB -->
+    <!-- STEP 2: HOST ACTION HUB -->
     <section id="view-home" class="hidden w-full max-w-3xl glass rounded-3xl p-8 sm:p-10 space-y-8">
       <div class="text-center space-y-2">
         <span id="home-welcome-tag" class="text-xs font-semibold uppercase tracking-widest text-cyan-400">Host Control Center</span>
@@ -463,17 +458,6 @@
     </div>
   </div>
 
-  <!-- LOGIN AUDIT LOGS MODAL -->
-  <div id="logs-modal" class="hidden fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
-    <div class="glass rounded-3xl max-w-2xl w-full p-6 space-y-4">
-      <div class="flex items-center justify-between">
-        <h3 class="font-display font-bold text-xl">🔐 Host Sign-In Audit Logs</h3>
-        <button id="close-logs-modal-btn" type="button" class="px-3 py-1 rounded-lg bg-zinc-800 text-xs">Close ✕</button>
-      </div>
-      <div id="logs-modal-body" class="space-y-2 max-h-80 overflow-y-auto"></div>
-    </div>
-  </div>
-
-  <script src="/static/host.js?v=2026"></script>
+  <script src="/static/host.js?v=2027"></script>
 </body>
 </html>
