@@ -1,5 +1,5 @@
 import random
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from backend.llm_router import call_structured_llm
 from backend.schemas import (
@@ -110,29 +110,41 @@ async def generate_remediation_deck(
     provider: str,
     source_text: str,
     missed_questions: List[Dict[str, Any]],
+    all_questions: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[RemediationDeckResponse, str]:
     """
-    Generates personalized study flashcards targeting concepts the participant missed during the match.
+    Generates:
+    1. Topic flashcards covering the main concepts tested in the quiz.
+    2. Mistake-specific remediation flashcards for any missed questions.
+    3. A short interactive remediation mini-quiz targeting missed concepts.
     """
-    if not missed_questions:
-        empty_deck = RemediationDeckResponse(
-            summary="Great job! You answered every question correctly.",
-            flashcards=[],
-        )
-        return empty_deck, "None"
+    all_questions = all_questions or []
+    topics_summary = "\n".join(
+        f"- {q.get('question', '')} (Answer: {q.get('reference_answer', '')})"
+        for q in all_questions[:10]
+    )
 
-    missed_summary = "\n".join(
-        f"- Question: {m.get('question', '')}\n  Your Answer: {m.get('your_answer', '')}\n  Correct Answer: {m.get('correct_answer', '')}"
-        for m in missed_questions[:8]
+    missed_summary = (
+        "\n".join(
+            f"- Question: {m.get('question', '')}\n  Your Answer: {m.get('your_answer', '')}\n  Correct Answer: {m.get('correct_answer', '')}"
+            for m in missed_questions[:8]
+        )
+        if missed_questions
+        else "None — the student answered every question correctly!"
     )
 
     system_prompt = (
-        "You are an expert study coach. Create concise, high-impact revision flashcards "
-        "for the concepts a student missed in a live quiz, grounded in the provided class notes."
+        "You are an expert study coach. Build a personalized post-quiz study kit grounded in the class notes: "
+        "(1) `topic_flashcards`: 3-4 flashcards summarizing the core concepts from the quiz; "
+        "(2) `flashcards`: 2-4 targeted remediation flashcards for the questions the student missed (empty list if none missed); "
+        "(3) `remediation_quiz`: 2-3 new 4-option multiple-choice practice questions testing the exact concepts the student missed (empty list if none missed)."
     )
 
     user_prompt = f"""
-Missed Questions:
+Quiz Questions Covered:
+{topics_summary}
+
+Questions Missed by Student:
 {missed_summary}
 
 Class Notes Reference:
@@ -140,7 +152,7 @@ Class Notes Reference:
 {(source_text or "")[:10000]}
 \"\"\"
 
-Generate a brief 1-sentence encouragement/study summary and 2 to 4 concise flashcards (`front`, `back`, `tag`) to help the student master these concepts.
+Return a brief encouraging `summary`, `topic_flashcards`, `flashcards` (mistake remediation), and `remediation_quiz` (4 options each, `correct_option_index` 0..3, and `explanation`).
 """
 
     try:
@@ -151,21 +163,33 @@ Generate a brief 1-sentence encouragement/study summary and 2 to 4 concise flash
             response_schema=RemediationDeckResponse,
         )
     except Exception:
-        # Deterministic fallback if LLM call times out at match end
-        fallback_cards = [
+        topic_cards = [
             FlashcardItem(
-                front=m.get("question", "Review Concept"),
+                front=q.get("question", "Key Topic"),
+                back=f"Key Takeaway: {q.get('reference_answer', '')}",
+                tag="Quiz Topic",
+            )
+            for q in all_questions[:4]
+        ]
+        mistake_cards = [
+            FlashcardItem(
+                front=m.get("question", "Missed Concept"),
                 back=f"Correct Answer: {m.get('correct_answer', '')}. {m.get('explanation', '')}".strip(),
-                tag="Missed Question Review",
+                tag="Mistake Review",
             )
             for m in missed_questions[:4]
         ]
         fallback_deck = RemediationDeckResponse(
-            summary="Review these key concepts from the questions you missed:",
-            flashcards=fallback_cards,
+            summary=(
+                "Mastery achieved! Review the key topic flashcards below."
+                if not missed_questions
+                else "Review these key concepts from the quiz and test yourself on the concepts you missed:"
+            ),
+            topic_flashcards=topic_cards,
+            flashcards=mistake_cards,
+            remediation_quiz=[],
         )
-        return fallback_deck, "Fallback Review"
-
+        return fallback_deck, "Fallback Study Kit"
 
 async def generate_bot_choice(
     provider: str,

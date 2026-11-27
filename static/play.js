@@ -7,6 +7,8 @@ let currentQuestionId = null;
 let selectedOptionIndex = -1;
 let answerLocked = false;
 let currentOptions = [];
+let stateSyncInterval = null;
+let practiceQuizData = [];
 
 const ALL_PLAYER_VIEWS = [
   "pview-join",
@@ -56,6 +58,38 @@ function fireSuccessConfetti() {
     spread: 70,
     origin: { y: 0.6 },
   });
+}
+
+function startStateSyncWatchdog() {
+  if (stateSyncInterval) clearInterval(stateSyncInterval);
+  stateSyncInterval = setInterval(async () => {
+    if (!currentPin || !myPlayerId) return;
+    const podiumVisible = !document.getElementById("pview-podium")?.classList.contains("hidden");
+    if (podiumVisible) {
+      clearInterval(stateSyncInterval);
+      return;
+    }
+    try {
+      const res = await fetch(
+        `/api/rooms/${encodeURIComponent(currentPin)}/state?player_id=${encodeURIComponent(myPlayerId)}`
+      );
+      if (!res.ok) return;
+      const state = await res.json();
+      if (state.status === "COMPLETED" && Array.isArray(state.leaderboard)) {
+        const me = state.leaderboard.find((p) => p.player_id === myPlayerId);
+        renderFinalPodium({
+          leaderboard: state.leaderboard,
+          your_summary: {
+            rank: me ? me.rank : 1,
+            total_players: state.leaderboard.length,
+            score: me ? me.score : 0,
+            correct_count: me ? me.correct_count : 0,
+            total_questions: state.total_questions || 0,
+          },
+        });
+      }
+    } catch (_) {}
+  }, 3000);
 }
 
 async function handleJoinSubmit(event) {
@@ -126,6 +160,7 @@ function connectPlayerWebSocket(pin, name, sid) {
       myName = msg.name;
       myAvatar = msg.avatar || "🐼";
       updateHudBadge();
+      startStateSyncWatchdog();
 
       document.getElementById("plobby-pin").innerText = pin;
       document.getElementById("plobby-avatar").innerText = myAvatar;
@@ -236,7 +271,7 @@ function connectPlayerWebSocket(pin, name, sid) {
       document.getElementById("pres-correct-choice").innerText = msg.reference_answer || "";
       document.getElementById("pres-explanation").innerText = yr.micro_tutoring || "";
       document.getElementById("pres-next-countdown").innerText = msg.is_last_question
-        ? `Final podium in ${msg.auto_next_seconds}s...`
+        ? `Final standings in ${msg.auto_next_seconds}s...`
         : `Next question in ${msg.auto_next_seconds}s...`;
 
       document.getElementById("pres-leaderboard").innerHTML = (msg.leaderboard || [])
@@ -258,60 +293,173 @@ function connectPlayerWebSocket(pin, name, sid) {
     }
 
     if (msg.type === "PODIUM") {
-      showPlayerView("pview-podium");
-      const summary = msg.your_summary || {};
-      updateHudBadge();
+      renderFinalPodium(msg);
+    }
 
-      document.getElementById("ppodium-personal-card").innerText =
-        `You placed #${summary.rank || 1} of ${summary.total_players || 1} • ${summary.score || 0} pts (${summary.correct_count || 0}/${summary.total_questions || 0} Correct)`;
-
-      document.getElementById("ppodium-list").innerHTML = (msg.leaderboard || [])
-        .map(
-          (p, idx) => `
-          <div class="flex items-center justify-between px-4 py-3 rounded-2xl ${
-            p.player_id === myPlayerId
-              ? "bg-cyan-500/20 border border-cyan-400/60"
-              : idx === 0
-              ? "bg-violet-600/20 border border-violet-500/40"
-              : "bg-zinc-900 border border-zinc-800"
-          }">
-            <div class="flex items-center gap-3">
-              <span class="font-display font-bold text-zinc-400 w-7">#${p.rank}</span>
-              <span class="text-xl">${p.avatar}</span>
-              <div>
-                <div class="font-bold text-sm">${escapeHtml(p.name)} ${p.player_id === myPlayerId ? "(You)" : ""}</div>
-                <div class="text-[11px] text-zinc-400">${p.correct_count || 0} correct</div>
-              </div>
-            </div>
-            <span class="font-display font-bold text-cyan-400">${p.score} pts</span>
-          </div>
-        `
-        )
-        .join("");
-
-      const deck = msg.remediation_deck;
-      const deckBox = document.getElementById("ppodium-flashcards-box");
-      if (deck && Array.isArray(deck.flashcards) && deck.flashcards.length > 0) {
-        deckBox.classList.remove("hidden");
-        document.getElementById("ppodium-deck-summary").innerText = deck.summary || "";
-        document.getElementById("ppodium-flashcards-list").innerHTML = deck.flashcards
-          .map(
-            (fc) => `
-            <div class="p-3.5 rounded-2xl bg-zinc-950 border border-amber-500/30 space-y-1 text-xs">
-              <div class="text-[10px] uppercase tracking-wider text-amber-400 font-bold">${escapeHtml(fc.tag || "Review")}</div>
-              <div class="font-semibold text-zinc-100">${escapeHtml(fc.front)}</div>
-              <div class="text-zinc-400 pt-1">${escapeHtml(fc.back)}</div>
-            </div>
-          `
-          )
-          .join("");
-      } else {
-        deckBox.classList.add("hidden");
-      }
-
-      fireSuccessConfetti();
+    if (msg.type === "STUDY_KIT_READY") {
+      renderStudyKit(msg.remediation_deck);
     }
   };
+}
+
+function renderFinalPodium(msg) {
+  showPlayerView("pview-podium");
+  const summary = msg.your_summary || {};
+  updateHudBadge();
+
+  document.getElementById("ppodium-personal-card").innerText =
+    `You placed #${summary.rank || 1} of ${summary.total_players || 1} • ${summary.score || 0} pts (${summary.correct_count || 0}/${summary.total_questions || 0} Correct)`;
+
+  const medals = ["🥇", "🥈", "🥉"];
+  document.getElementById("ppodium-list").innerHTML = (msg.leaderboard || [])
+    .map((p, idx) => {
+      const medal = medals[idx] || `#${p.rank}`;
+      const isMe = p.player_id === myPlayerId;
+      return `
+        <div class="flex items-center justify-between px-4 py-3 rounded-2xl ${
+          isMe
+            ? "bg-cyan-500/20 border border-cyan-400/60"
+            : idx === 0
+            ? "bg-violet-600/20 border border-violet-500/40"
+            : "bg-zinc-900 border border-zinc-800"
+        }">
+          <div class="flex items-center gap-3">
+            <span class="font-display font-bold text-base w-7 text-center">${medal}</span>
+            <span class="text-xl">${p.avatar || "🐼"}</span>
+            <div>
+              <div class="font-bold text-sm">${escapeHtml(p.name)} ${isMe ? "(You)" : ""}</div>
+              <div class="text-[11px] text-zinc-400">${p.correct_count || 0} correct</div>
+            </div>
+          </div>
+          <span class="font-display font-bold text-cyan-400">${p.score || 0} pts</span>
+        </div>
+      `;
+    })
+    .join("");
+
+  if (msg.remediation_deck) {
+    renderStudyKit(msg.remediation_deck);
+  } else {
+    document.getElementById("ppodium-study-loading")?.classList.remove("hidden");
+  }
+
+  fireSuccessConfetti();
+}
+
+function renderFlipCardHtml(fc, accentBorderClass, accentTextClass) {
+  return `
+    <div onclick="this.classList.toggle('flipped')"
+      class="group p-4 rounded-2xl bg-zinc-950 border ${accentBorderClass} cursor-pointer transition hover:bg-zinc-900/90 space-y-2 text-xs select-none">
+      <div class="flex items-center justify-between">
+        <span class="text-[10px] uppercase tracking-wider ${accentTextClass} font-bold">${escapeHtml(fc.tag || "Concept")}</span>
+        <span class="text-[10px] text-zinc-500">Tap to flip ↻</span>
+      </div>
+      <div class="font-semibold text-zinc-100 leading-snug">${escapeHtml(fc.front)}</div>
+      <div class="hidden group-[.flipped]:block pt-2 border-t border-zinc-800 text-cyan-200 leading-relaxed">
+        ${escapeHtml(fc.back)}
+      </div>
+    </div>
+  `;
+}
+
+function renderStudyKit(deck) {
+  const loadingEl = document.getElementById("ppodium-study-loading");
+  if (loadingEl) loadingEl.classList.add("hidden");
+  if (!deck) return;
+
+  // 1. Topic Flashcards
+  const topicBox = document.getElementById("ppodium-topic-cards-box");
+  const topicList = document.getElementById("ppodium-topic-cards-list");
+  const topicCards = Array.isArray(deck.topic_flashcards) ? deck.topic_flashcards : [];
+  if (topicBox && topicList && topicCards.length > 0) {
+    topicBox.classList.remove("hidden");
+    topicList.innerHTML = topicCards
+      .map((fc) => renderFlipCardHtml(fc, "border-cyan-500/35", "text-cyan-400"))
+      .join("");
+  }
+
+  // 2. Mistake Remediation Flashcards
+  const mistakeBox = document.getElementById("ppodium-flashcards-box");
+  const mistakeList = document.getElementById("ppodium-flashcards-list");
+  const mistakeCards = Array.isArray(deck.flashcards) ? deck.flashcards : [];
+  if (mistakeBox && mistakeList && mistakeCards.length > 0) {
+    mistakeBox.classList.remove("hidden");
+    document.getElementById("ppodium-deck-summary").innerText = deck.summary || "";
+    mistakeList.innerHTML = mistakeCards
+      .map((fc) => renderFlipCardHtml(fc, "border-amber-500/40", "text-amber-400"))
+      .join("");
+  }
+
+  // 3. Interactive Remediation Practice Quiz
+  const practiceBox = document.getElementById("ppodium-practice-box");
+  const practiceList = document.getElementById("ppodium-practice-list");
+  practiceQuizData = Array.isArray(deck.remediation_quiz) ? deck.remediation_quiz : [];
+  if (practiceBox && practiceList && practiceQuizData.length > 0) {
+    practiceBox.classList.remove("hidden");
+    const letters = ["A", "B", "C", "D"];
+    practiceList.innerHTML = practiceQuizData
+      .map(
+        (pq, qIdx) => `
+        <div id="pq-card-${qIdx}" class="p-4 rounded-2xl bg-zinc-950/90 border border-emerald-500/30 space-y-3">
+          <div class="text-xs font-bold text-emerald-400">Practice Question #${qIdx + 1}</div>
+          <div class="text-sm font-semibold text-zinc-100">${escapeHtml(pq.question)}</div>
+          <div class="grid sm:grid-cols-2 gap-2">
+            ${(pq.options || [])
+              .map(
+                (opt, oIdx) => `
+                <button type="button" onclick="answerPracticeQuestion(${qIdx}, ${oIdx}, this)"
+                  class="pq-opt-${qIdx} p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 hover:border-emerald-400 text-left text-xs text-zinc-200 transition">
+                  <strong>${letters[oIdx]}.</strong> ${escapeHtml(opt)}
+                </button>
+              `
+              )
+              .join("")}
+          </div>
+          <div id="pq-feedback-${qIdx}" class="hidden p-3 rounded-xl text-xs leading-relaxed"></div>
+        </div>
+      `
+      )
+      .join("");
+  }
+}
+
+function answerPracticeQuestion(qIdx, chosenIdx, btnEl) {
+  const pq = practiceQuizData[qIdx];
+  if (!pq) return;
+
+  const buttons = document.querySelectorAll(`.pq-opt-${qIdx}`);
+  buttons.forEach((b) => (b.disabled = true));
+
+  const correctIdx = intVal(pq.correct_option_index);
+  const isRight = chosenIdx === correctIdx;
+
+  buttons.forEach((b, idx) => {
+    if (idx === correctIdx) {
+      b.classList.remove("border-zinc-800", "bg-zinc-900");
+      b.classList.add("border-emerald-500", "bg-emerald-500/20", "text-emerald-200");
+    } else if (idx === chosenIdx && !isRight) {
+      b.classList.remove("border-zinc-800", "bg-zinc-900");
+      b.classList.add("border-rose-500", "bg-rose-500/20", "text-rose-200");
+    }
+  });
+
+  const fb = document.getElementById(`pq-feedback-${qIdx}`);
+  if (fb) {
+    fb.classList.remove("hidden");
+    if (isRight) {
+      fb.className = "p-3 rounded-xl bg-emerald-500/15 border border-emerald-500/40 text-emerald-200 text-xs";
+      fb.innerText = `🎉 Spot on! ${pq.explanation || ""}`;
+      fireSuccessConfetti();
+    } else {
+      fb.className = "p-3 rounded-xl bg-rose-500/15 border border-rose-500/40 text-rose-200 text-xs";
+      fb.innerText = `Not quite — ${pq.explanation || ""}`;
+    }
+  }
+}
+
+function intVal(v) {
+  const n = parseInt(v, 10);
+  return Number.isNaN(n) ? 0 : n;
 }
 
 function renderPlayerOptions(options, chosenIdx, isLocked) {
@@ -373,6 +521,7 @@ function escapeHtml(str) {
 }
 
 window.selectAnswerOption = selectAnswerOption;
+window.answerPracticeQuestion = answerPracticeQuestion;
 
 document.addEventListener("DOMContentLoaded", () => {
   const params = new URLSearchParams(location.search);
@@ -384,6 +533,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.getElementById("join-room-form")?.addEventListener("submit", handleJoinSubmit);
   document.getElementById("btn-play-again")?.addEventListener("click", () => {
+    if (stateSyncInterval) clearInterval(stateSyncInterval);
     if (playerWs) playerWs.close();
     showPlayerView("pview-join");
   });

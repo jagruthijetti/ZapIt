@@ -177,3 +177,22 @@ class BotAnswerResponse(BaseModel):
 
 class BotBanterResponse(BaseModel):
     banter: str
+
+class FlashcardItem(BaseModel):
+    front: str
+    back: str
+    tag: str = "Concept Review"
+
+
+class PracticeQuizQuestion(BaseModel):
+    question: str
+    options: List[str] = Field(..., min_length=4, max_length=4)
+    correct_option_index: int = Field(..., ge=0, le=3)
+    explanation: str
+
+
+class RemediationDeckResponse(BaseModel):
+    summary: str
+    topic_flashcards: List[FlashcardItem] = Field(default_factory=list)
+    flashcards: List[FlashcardItem] = Field(default_factory=list)
+    remediation_quiz: List[PracticeQuizQuestion] = Field(default_factory=list)

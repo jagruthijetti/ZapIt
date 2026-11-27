@@ -552,12 +552,41 @@ async def finish_round(room: GameRoom) -> None:
         room.auto_next_task = asyncio.create_task(_run_auto_next_countdown(room, room.current_index))
 
 
+async def _deliver_player_study_kit(room: GameRoom, p: Participant) -> None:
+    if p.is_bot or p.ws is None:
+        return
+    try:
+        deck_obj, model_used = await generate_remediation_deck(
+            provider=room.provider,
+            source_text=room.source_text,
+            missed_questions=p.missed_questions,
+            all_questions=room.questions,
+        )
+        deck_dict = deck_obj.model_dump()
+        await save_remediation_deck(
+            game_pin=room.pin,
+            player_id=p.player_id,
+            player_name=p.name,
+            deck=deck_dict,
+            model_used=model_used,
+        )
+        if p.ws is not None:
+            await p.ws.send_json(
+                {
+                    "type": "STUDY_KIT_READY",
+                    "remediation_deck": deck_dict,
+                }
+            )
+    except Exception:
+        pass
+
+
 async def _complete_match(room: GameRoom) -> None:
     room.status = "COMPLETED"
     leaderboard = room.get_leaderboard()
     rank_map = {row["player_id"]: row["rank"] for row in leaderboard}
 
-    # Broadcast final standings to Host immediately so the podium displays without delay
+    # 1. Immediately transition Host to Final Standings
     await room.send_to_host(
         {
             "type": "PODIUM",
@@ -567,32 +596,9 @@ async def _complete_match(room: GameRoom) -> None:
         }
     )
 
-    try:
-        await update_room_status(room.pin, "COMPLETED")
-    except Exception:
-        pass
-
+    # 2. Immediately transition ALL Participants to Final Standings (never wait on LLM)
     for p in list(room.participants.values()):
         if not p.is_bot and p.ws is not None:
-            deck_dict = None
-            if p.missed_questions:
-                try:
-                    deck_obj, model_used = await generate_remediation_deck(
-                        provider=room.provider,
-                        source_text=room.source_text,
-                        missed_questions=p.missed_questions,
-                    )
-                    deck_dict = deck_obj.model_dump()
-                    await save_remediation_deck(
-                        game_pin=room.pin,
-                        player_id=p.player_id,
-                        player_name=p.name,
-                        deck=deck_dict,
-                        model_used=model_used,
-                    )
-                except Exception:
-                    deck_dict = None
-
             try:
                 await p.ws.send_json(
                     {
@@ -605,9 +611,19 @@ async def _complete_match(room: GameRoom) -> None:
                             "score": p.score,
                             "correct_count": p.correct_count,
                             "total_questions": len(room.questions),
+                            "missed_count": len(p.missed_questions),
                         },
-                        "remediation_deck": deck_dict,
                     }
                 )
             except Exception:
                 p.ws = None
+
+    try:
+        await update_room_status(room.pin, "COMPLETED")
+    except Exception:
+        pass
+
+    # 3. Generate & push personalized Topic Flashcards, Mistake Remediation & Mini-Quiz in parallel
+    for p in list(room.participants.values()):
+        if not p.is_bot and p.ws is not None:
+            asyncio.create_task(_deliver_player_study_kit(room, p))
