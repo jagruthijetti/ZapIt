@@ -3,185 +3,168 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ZapIt — Join Live Quiz</title>
+  <title>ZapIt — Live Participant Arena</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js"></script>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
-<body class="min-h-screen bg-grid flex flex-col justify-between selection:bg-violet-500 selection:text-white">
+<body class="min-h-screen bg-grid flex flex-col justify-between selection:bg-cyan-500 selection:text-zinc-950">
 
   <header class="w-full px-6 py-4 flex items-center justify-between border-b border-zinc-800/80 bg-zinc-950/70 backdrop-blur-md sticky top-0 z-50">
     <div class="flex items-center gap-3">
-      <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-600 to-cyan-500 flex items-center justify-center font-display font-bold text-lg shadow-lg shadow-violet-600/30">Z</div>
+      <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-600 to-cyan-500 flex items-center justify-center font-display font-bold text-lg shadow-lg shadow-cyan-500/20">Z</div>
       <span class="font-display font-bold text-xl tracking-tight">Zap<span class="text-cyan-400">It</span></span>
-      <span id="player-engine-badge" class="hidden sm:inline-block text-xs px-3 py-1 rounded-full bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 font-medium">
+      <span class="text-xs px-3 py-1 rounded-full bg-cyan-500/15 border border-cyan-500/40 text-cyan-300 font-semibold">
         Participant Arena
       </span>
     </div>
-    <button id="sound-toggle" type="button" onclick="toggleSound()" class="px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-xs text-zinc-300 hover:border-cyan-500/50 transition">
-      🔊 Sound On
-    </button>
+
+    <div class="flex items-center gap-3">
+      <span id="player-hud-badge" class="hidden text-xs px-3 py-1.5 rounded-xl bg-zinc-900 border border-zinc-700 text-zinc-200 font-semibold">
+        🦊 Player • 0 pts
+      </span>
+      <a href="/host" class="px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-xs text-violet-300 hover:border-violet-500/50 transition">
+        Host Studio ↗
+      </a>
+    </div>
   </header>
 
   <main class="flex-1 flex items-center justify-center p-4 sm:p-8">
 
-    <!-- VIEW 1: PARTICIPANT JOIN -->
-    <section id="view-join" class="w-full max-w-md glass rounded-3xl p-8 space-y-6">
-      <div class="text-center">
-        <span class="text-xs font-semibold uppercase tracking-widest text-cyan-400">ZapIt Live Arena</span>
-        <h1 class="text-3xl font-bold mt-1">Enter Quiz PIN</h1>
-        <p class="text-zinc-400 text-xs mt-1">Get the 6-digit PIN from your host's screen to join.</p>
+    <!-- VIEW 1: JOIN QUIZ ROOM -->
+    <section id="pview-join" class="w-full max-w-md glass rounded-3xl p-8 space-y-6">
+      <div class="text-center space-y-1.5">
+        <span class="text-xs font-semibold uppercase tracking-widest text-cyan-400">Live Classroom Quiz</span>
+        <h1 class="text-3xl font-bold">Join a ZapIt Match</h1>
+        <p class="text-xs text-zinc-400">Enter the 6-digit Game PIN shown on your instructor's screen.</p>
       </div>
 
-      <div class="space-y-4">
+      <form id="join-room-form" class="space-y-4">
         <div>
-          <label class="text-xs text-zinc-400 block mb-1">6-Digit Quiz PIN</label>
-          <input id="join-pin" type="text" maxlength="6" placeholder="000000"
-            class="w-full px-4 py-3.5 rounded-2xl bg-zinc-950 border border-zinc-700 focus:border-cyan-400 focus:outline-none text-center font-display text-3xl tracking-[0.3em]" />
+          <label class="text-xs text-zinc-400 block mb-1">6-Digit Game PIN</label>
+          <input id="join-pin" type="text" inputmode="numeric" maxlength="6" required placeholder="123456"
+            class="w-full px-4 py-3.5 rounded-2xl bg-zinc-950 border border-zinc-700 focus:border-cyan-400 focus:outline-none text-center font-display font-bold text-3xl tracking-[0.25em] text-cyan-300" />
         </div>
-        <div>
-          <label class="text-xs text-zinc-400 block mb-1">Your Name</label>
-          <input id="join-name" type="text" placeholder="e.g. Riya Sharma"
-            class="w-full px-4 py-3 rounded-xl bg-zinc-950 border border-zinc-700 focus:border-cyan-400 focus:outline-none text-sm" />
-        </div>
-        <div>
-          <label class="text-xs text-zinc-400 block mb-1">Student ID / Roll No.</label>
-          <input id="join-sid" type="text" placeholder="e.g. 22CS104"
-            class="w-full px-4 py-3 rounded-xl bg-zinc-950 border border-zinc-700 focus:border-cyan-400 focus:outline-none text-sm" />
-        </div>
-      </div>
 
-      <div id="join-error-box" class="hidden p-3.5 rounded-xl bg-rose-500/15 border border-rose-500/50 text-rose-300 text-xs font-medium"></div>
+        <div class="grid sm:grid-cols-2 gap-3">
+          <div>
+            <label class="text-xs text-zinc-400 block mb-1">Your Name</label>
+            <input id="join-name" type="text" required placeholder="e.g. Aarav"
+              class="w-full px-3.5 py-2.5 rounded-xl bg-zinc-950 border border-zinc-700 focus:border-violet-500 focus:outline-none text-sm" />
+          </div>
+          <div>
+            <label class="text-xs text-zinc-400 block mb-1">Roll / Student ID</label>
+            <input id="join-sid" type="text" required placeholder="e.g. 22CS041"
+              class="w-full px-3.5 py-2.5 rounded-xl bg-zinc-950 border border-zinc-700 focus:border-violet-500 focus:outline-none text-sm" />
+          </div>
+        </div>
 
-      <button id="btn-join-zapit" type="button" onclick="joinRoom()" class="glow-btn w-full py-4 rounded-2xl font-display font-bold text-lg text-white">
-        Join ZapIt ⚡
-      </button>
+        <div id="join-error-box" class="hidden p-3 rounded-xl bg-rose-500/15 border border-rose-500/50 text-rose-300 text-xs font-medium"></div>
+
+        <button id="btn-join-room" type="submit" class="glow-btn w-full py-4 rounded-2xl font-display font-bold text-lg text-white">
+          Enter Arena 🚀
+        </button>
+      </form>
     </section>
 
-    <!-- VIEW 2: PARTICIPANT WAITING LOBBY -->
-    <section id="view-lobby" class="hidden w-full max-w-lg glass rounded-3xl p-8 text-center space-y-5">
-      <span class="inline-block px-3 py-1 rounded-full bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 text-xs" id="lobby-title">
-        Connected
-      </span>
-      <div id="my-avatar-badge" class="text-6xl my-2">🦊</div>
-      <h2 id="my-display-name" class="text-2xl font-bold">You're in!</h2>
-      <p class="text-sm text-zinc-400">Waiting for your host to start the quiz...</p>
-      <div class="p-3 rounded-2xl bg-zinc-950/80 border border-zinc-800 text-xs text-cyan-300 animate-pulse">
-        Keep this tab open — questions will appear automatically.
+    <!-- VIEW 2: WAITING IN LOBBY -->
+    <section id="pview-lobby" class="hidden w-full max-w-xl glass rounded-3xl p-8 text-center space-y-6">
+      <div class="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 text-xs font-bold">
+        ✅ Connected to Room <span id="plobby-pin" class="font-mono">000000</span>
+      </div>
+
+      <div class="space-y-2">
+        <div id="plobby-avatar" class="text-6xl">🦊</div>
+        <h2 id="plobby-welcome" class="text-2xl font-bold">You're in!</h2>
+        <p id="plobby-title" class="text-sm text-cyan-300 font-medium">Waiting for Host to launch the quiz...</p>
+      </div>
+
+      <div class="p-4 rounded-2xl bg-zinc-950/80 border border-zinc-800 space-y-2.5 text-left">
+        <div class="flex items-center justify-between text-xs text-zinc-400">
+          <span>Players in Lobby</span>
+          <span id="plobby-count" class="text-cyan-400 font-bold">1 Joined</span>
+        </div>
+        <div id="plobby-players" class="flex flex-wrap gap-2"></div>
       </div>
     </section>
 
-    <!-- VIEW 3: LIVE MCQ QUESTION ARENA -->
-    <section id="view-question" class="hidden w-full max-w-2xl glass rounded-3xl p-7 sm:p-8">
-      <div class="flex items-center justify-between mb-6">
-        <span id="q-progress" class="px-3 py-1 rounded-full bg-zinc-900 border border-zinc-700 text-xs font-semibold text-zinc-300">
+    <!-- VIEW 3: LIVE QUESTION -->
+    <section id="pview-question" class="hidden w-full max-w-2xl glass rounded-3xl p-6 sm:p-8 space-y-6">
+      <div class="flex items-center justify-between">
+        <span id="pq-progress" class="px-3.5 py-1 rounded-full bg-zinc-900 border border-zinc-700 text-xs font-semibold text-zinc-300">
           Question 1 of 5
         </span>
-        <div class="relative w-16 h-16 flex items-center justify-center">
-          <svg class="w-16 h-16 -rotate-90" viewBox="0 0 64 64">
-            <circle cx="32" cy="32" r="28" stroke="#27272a" stroke-width="5" fill="none" />
-            <circle id="timer-ring" cx="32" cy="32" r="28" stroke="#06b6d4" stroke-width="5" fill="none"
-              stroke-dasharray="175.9" stroke-dashoffset="0" stroke-linecap="round" class="transition-all duration-500" />
-          </svg>
-          <span id="timer-text" class="absolute font-display font-bold text-lg">20</span>
-        </div>
-        <span id="q-marks" class="px-3 py-1 rounded-full bg-violet-500/15 border border-violet-500/30 text-xs font-semibold text-violet-300">
+        <span id="pq-timer" class="font-display font-bold text-3xl text-cyan-400">20s</span>
+        <span id="pq-marks" class="px-3.5 py-1 rounded-full bg-violet-500/20 border border-violet-500/40 text-xs font-semibold text-violet-300">
           2 Marks
         </span>
       </div>
 
-      <h2 id="q-text" class="text-xl sm:text-2xl font-bold leading-snug mb-6">Question...</h2>
+      <h2 id="pq-text" class="text-xl sm:text-2xl font-bold leading-snug">Loading question...</h2>
 
-      <div id="mcq-options-grid" class="grid sm:grid-cols-2 gap-3.5"></div>
+      <div id="pq-options-grid" class="grid sm:grid-cols-2 gap-3.5"></div>
 
-      <div id="answer-locked-banner" class="hidden mt-5 p-4 rounded-2xl bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 text-center text-sm font-medium">
-        ✅ Choice locked! Explanation will appear when the timer finishes...
+      <div id="pq-locked-banner" class="hidden p-4 rounded-2xl bg-cyan-500/15 border border-cyan-500/40 text-center space-y-1">
+        <div class="text-sm font-bold text-cyan-300">🔒 Answer Locked In!</div>
+        <div id="pq-locked-choice" class="text-xs text-zinc-300">Waiting for timer to finish so results can be revealed...</div>
       </div>
     </section>
 
-    <!-- VIEW 4: QUESTION EXPLANATION ONLY (NO STANDINGS UNTIL ENTIRE QUIZ ENDS) -->
-    <section id="view-result" class="hidden w-full max-w-2xl glass rounded-3xl p-7 sm:p-8 space-y-5">
-      <div class="px-4 py-2.5 rounded-xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-between text-xs text-cyan-300">
-        <span id="auto-next-label" class="font-semibold">⏭️ Next question starting automatically in 6s...</span>
-        <span class="font-mono text-zinc-400">Standings Hidden</span>
+    <!-- VIEW 4: ROUND RESULT & INSTANT FEEDBACK -->
+    <section id="pview-result" class="hidden w-full max-w-2xl glass rounded-3xl p-6 sm:p-8 space-y-5">
+      <div id="pres-banner" class="p-5 rounded-2xl border text-center space-y-1.5">
+        <div id="pres-icon" class="text-4xl">🎉</div>
+        <h2 id="pres-headline" class="font-display font-bold text-2xl">Correct!</h2>
+        <p id="pres-points-line" class="text-sm font-semibold">+950 pts • Total: 950 pts • Rank #1</p>
       </div>
 
-      <div class="p-5 rounded-2xl bg-zinc-950/90 border border-violet-500/40 space-y-3">
-        <div>
-          <span id="res-badge" class="px-3.5 py-1.5 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-300">Correct!</span>
+      <div class="p-4 rounded-2xl bg-zinc-950/90 border border-zinc-800 space-y-2 text-xs">
+        <div class="text-zinc-400">
+          Your Choice: <strong id="pres-your-choice" class="text-zinc-100">A) ...</strong>
         </div>
-        <div>
-          <span class="text-xs uppercase tracking-wider text-violet-400 font-semibold block mb-1">Explanation</span>
-          <p class="text-sm sm:text-base text-zinc-100 leading-relaxed" id="res-tutoring"></p>
+        <div class="text-emerald-400">
+          Correct Answer: <strong id="pres-correct-choice">A) ...</strong>
         </div>
+        <p id="pres-explanation" class="text-zinc-300 pt-1 leading-relaxed"></p>
       </div>
 
-      <div class="p-4 rounded-2xl bg-zinc-900/70 border border-zinc-800">
-        <span class="text-xs uppercase tracking-wider text-zinc-400 font-semibold">Correct Answer</span>
-        <p id="res-ref-answer" class="text-sm text-emerald-300 font-medium mt-1"></p>
-      </div>
-    </section>
-
-    <!-- VIEW 5: FINAL STANDINGS, YOUR MISTAKES & 3D REMEDIATION DECK -->
-    <section id="view-podium" class="hidden w-full max-w-4xl glass rounded-3xl p-7 sm:p-8 space-y-8">
-      <div class="text-center space-y-2">
-        <span class="text-xs uppercase tracking-widest text-cyan-400 font-bold">Entire Quiz Complete</span>
-        <h2 class="text-3xl sm:text-4xl font-bold">🏆 Final Standings & Review</h2>
-        <div id="my-final-summary" class="inline-block mt-2 px-5 py-2 rounded-full bg-violet-600/25 border border-violet-500/50 font-display font-bold text-base text-cyan-300"></div>
-      </div>
-
-      <div class="space-y-3">
-        <h3 class="font-display font-bold text-xl">📊 Leaderboard Standings</h3>
-        <div id="podium-list" class="space-y-2 max-h-64 overflow-y-auto pr-1"></div>
-      </div>
-
-      <div class="pt-6 border-t border-zinc-800 space-y-4">
+      <div class="space-y-2">
         <div class="flex items-center justify-between">
-          <div>
-            <span class="text-xs uppercase tracking-widest text-rose-400 font-bold">Answer Audit</span>
-            <h3 class="text-xl sm:text-2xl font-bold">📝 Your Mistakes & Explanations</h3>
-          </div>
-          <span id="mistakes-count-badge" class="text-xs px-3 py-1 rounded-full bg-zinc-900 border border-zinc-700 text-zinc-300"></span>
+          <h3 class="font-display font-bold text-base">🏆 Top Standings</h3>
+          <span id="pres-next-countdown" class="text-xs text-cyan-400 font-semibold">Next question soon...</span>
         </div>
-        <div id="my-mistakes-list" class="space-y-3"></div>
+        <div id="pres-leaderboard" class="space-y-2 max-h-52 overflow-y-auto pr-1"></div>
+      </div>
+    </section>
+
+    <!-- VIEW 5: FINAL STANDINGS & PODIUM -->
+    <section id="pview-podium" class="hidden w-full max-w-2xl glass rounded-3xl p-7 sm:p-8 space-y-6">
+      <div class="text-center space-y-2">
+        <span class="text-xs uppercase tracking-widest text-cyan-400 font-bold">Match Finished</span>
+        <h2 class="text-3xl font-bold">🏆 Final Leaderboard</h2>
+        <div id="ppodium-personal-card" class="inline-block px-5 py-2.5 rounded-2xl bg-violet-600/20 border border-violet-500/40 text-sm font-bold text-violet-200">
+          You finished #1 with 0 pts!
+        </div>
       </div>
 
-      <div class="pt-6 border-t border-zinc-800 space-y-6">
-        <div class="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <span class="text-xs uppercase tracking-widest text-violet-400 font-bold">Personalized AI Study Coach</span>
-            <h3 class="text-xl sm:text-2xl font-bold">🧠 Your Remediation Deck</h3>
-          </div>
-          <span id="remediation-model-tag" class="text-xs px-3 py-1 rounded-full bg-zinc-900 border border-zinc-700 text-zinc-300"></span>
-        </div>
+      <div id="ppodium-list" class="space-y-2.5 max-h-72 overflow-y-auto pr-1"></div>
 
-        <div id="remediation-loading" class="p-6 rounded-2xl bg-zinc-950 border border-zinc-800 text-center text-sm text-cyan-300 animate-pulse">
-          Building your personal 5-card 3D study deck + 2 redemption checks...
-        </div>
-
-        <div id="remediation-content" class="hidden space-y-6">
-          <p id="remediation-summary" class="p-4 rounded-2xl bg-violet-500/10 border border-violet-500/30 text-sm text-violet-200"></p>
-          <div>
-            <p class="text-xs text-zinc-400 mb-3">Tap any flashcard to flip in 3D:</p>
-            <div id="flashcards-grid" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
-          </div>
-          <div class="space-y-3">
-            <h4 class="font-display font-bold text-lg text-cyan-300">🎯 Redemption Check (Verify Mastery with AI)</h4>
-            <div id="redemption-list" class="space-y-4"></div>
-          </div>
-        </div>
+      <div id="ppodium-flashcards-box" class="hidden space-y-3 pt-2 border-t border-zinc-800">
+        <h3 class="font-display font-bold text-base text-amber-300">🧠 AI Study Flashcards (Missed Concepts)</h3>
+        <p id="ppodium-deck-summary" class="text-xs text-zinc-400"></p>
+        <div id="ppodium-flashcards-list" class="grid sm:grid-cols-2 gap-3"></div>
       </div>
 
       <div class="text-center pt-2">
-        <button type="button" onclick="location.reload()" class="px-6 py-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-sm font-medium">
-          Join Another Quiz
+        <button id="btn-play-again" type="button" class="glow-btn px-8 py-3.5 rounded-2xl font-display font-bold text-white">
+          Join Another Match ⚡
         </button>
       </div>
     </section>
 
   </main>
 
-  <script src="/static/play.js"></script>
+  <script src="/static/play.js?v=2027"></script>
 </body>
 </html>
