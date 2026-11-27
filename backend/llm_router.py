@@ -1,7 +1,8 @@
+import asyncio
 import json
 import os
 import re
-from typing import Tuple, Type, TypeVar
+from typing import List, Tuple, Type, TypeVar
 
 import httpx
 from pydantic import BaseModel
@@ -34,6 +35,26 @@ def _extract_json_block(raw_text: str) -> str:
     return text
 
 
+def _is_transient_overload(err: Exception) -> bool:
+    msg = str(err).upper()
+    return any(code in msg for code in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "OVERLOADED", "TIMEOUT"))
+
+
+def _get_gemini_fallback_models(primary_model: str) -> List[str]:
+    candidates = [
+        primary_model,
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash",
+    ]
+    seen = set()
+    ordered = []
+    for m in candidates:
+        if m and m not in seen:
+            seen.add(m)
+            ordered.append(m)
+    return ordered
+
+
 async def _call_gemini_structured(
     system_prompt: str,
     user_prompt: str,
@@ -43,59 +64,75 @@ async def _call_gemini_structured(
     if not api_key:
         raise LLMRouterError("GEMINI_API_KEY is not configured in environment variables.")
 
-    model_name = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
+    primary_model = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
+    models_to_try = _get_gemini_fallback_models(primary_model)
+    last_error: Exception = RuntimeError("Unknown Gemini error")
 
-    try:
-        from google import genai
-        from google.genai import types
+    for model_name in models_to_try:
+        for attempt in range(2):
+            try:
+                from google import genai
+                from google.genai import types
 
-        client = genai.Client(api_key=api_key)
-        response = await client.aio.models.generate_content(
-            model=model_name,
-            contents=user_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                response_mime_type="application/json",
-                response_schema=response_schema,
-                temperature=0.3,
-            ),
-        )
-        raw = response.text or ""
-        parsed = response_schema.model_validate_json(_extract_json_block(raw))
-        return parsed, f"Gemini ({model_name})"
-    except ImportError:
-        # Fallback to direct Gemini REST API if google-genai SDK is not installed
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-        schema_json = json.dumps(response_schema.model_json_schema(), indent=2)
-        payload = {
-            "systemInstruction": {"parts": [{"text": system_prompt}]},
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [
+                client = genai.Client(api_key=api_key)
+                response = await client.aio.models.generate_content(
+                    model=model_name,
+                    contents=user_prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        response_mime_type="application/json",
+                        response_schema=response_schema,
+                        temperature=0.3,
+                    ),
+                )
+                raw = response.text or ""
+                parsed = response_schema.model_validate_json(_extract_json_block(raw))
+                return parsed, f"Gemini ({model_name})"
+
+            except ImportError:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+                schema_json = json.dumps(response_schema.model_json_schema(), indent=2)
+                payload = {
+                    "systemInstruction": {"parts": [{"text": system_prompt}]},
+                    "contents": [
                         {
-                            "text": f"{user_prompt}\n\nReturn ONLY valid JSON matching this schema:\n{schema_json}"
+                            "role": "user",
+                            "parts": [
+                                {
+                                    "text": f"{user_prompt}\n\nReturn ONLY valid JSON matching this schema:\n{schema_json}"
+                                }
+                            ],
                         }
                     ],
+                    "generationConfig": {
+                        "responseMimeType": "application/json",
+                        "temperature": 0.3,
+                    },
                 }
-            ],
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "temperature": 0.3,
-            },
-        }
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(url, json=payload)
-            if resp.status_code != 200:
-                raise LLMRouterError(f"Gemini API error ({resp.status_code}): {resp.text[:300]}")
-            data = resp.json()
-            raw = data["candidates"][0]["content"]["parts"][0]["text"]
-            parsed = response_schema.model_validate_json(_extract_json_block(raw))
-            return parsed, f"Gemini ({model_name})"
-    except LLMRouterError:
-        raise
-    except Exception as err:
-        raise LLMRouterError(f"Gemini generation failed: {err}") from err
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    resp = await client.post(url, json=payload)
+                    if resp.status_code != 200:
+                        err = RuntimeError(f"Gemini API error ({resp.status_code}): {resp.text[:300]}")
+                        last_error = err
+                        if _is_transient_overload(err):
+                            await asyncio.sleep(1.5 * (attempt + 1))
+                            continue
+                        raise LLMRouterError(str(err)) from err
+                    data = resp.json()
+                    raw = data["candidates"][0]["content"]["parts"][0]["text"]
+                    parsed = response_schema.model_validate_json(_extract_json_block(raw))
+                    return parsed, f"Gemini ({model_name})"
+
+            except Exception as err:
+                last_error = err
+                if _is_transient_overload(err):
+                    await asyncio.sleep(1.5 * (attempt + 1))
+                    continue
+                raise LLMRouterError(f"Gemini generation failed: {err}") from err
+
+    raise LLMRouterError(
+        f"All Gemini models are temporarily busy ({last_error}). Please try again in a few seconds."
+    )
 
 
 async def _call_ollama_structured(
