@@ -436,6 +436,67 @@ async function publishQuiz() {
   }
 }
 
+function renderTopicHeatmap(heatmap, containerId = "host-topic-heatmap") {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+
+  if (!heatmap || !heatmap.length) {
+    container.innerHTML = `<p class="text-xs text-zinc-500 p-4 rounded-2xl bg-zinc-950/70 border border-zinc-800">No human student responses recorded for heatmap analysis.</p>`;
+    return;
+  }
+
+  container.innerHTML = heatmap
+    .map((item) => {
+      const pct = item.accuracy_pct ?? 0;
+      let borderCls = "border-emerald-500/40 bg-emerald-500/5";
+      let barCls = "bg-emerald-400";
+      let badgeCls = "bg-emerald-500/20 text-emerald-300";
+      let statusLabel = "Mastered";
+
+      if (pct < 50) {
+        borderCls = "border-rose-500/50 bg-rose-500/10";
+        barCls = "bg-rose-500";
+        badgeCls = "bg-rose-500/20 text-rose-300";
+        statusLabel = "Needs Review";
+      } else if (pct < 80) {
+        borderCls = "border-amber-500/50 bg-amber-500/10";
+        barCls = "bg-amber-400";
+        badgeCls = "bg-amber-500/20 text-amber-300";
+        statusLabel = "Mixed";
+      }
+
+      const trapHtml = item.most_common_wrong
+        ? `<div class="text-[11px] text-rose-300/90 mt-1">⚠️ Top Misconception: <span class="font-medium">${escapeHtml(item.most_common_wrong)}</span></div>`
+        : "";
+
+      return `
+        <div class="p-3.5 rounded-2xl border ${borderCls} space-y-2">
+          <div class="flex items-start justify-between gap-2">
+            <div class="text-xs font-semibold text-zinc-100 leading-snug">
+              <span class="text-cyan-400 font-bold">Q${item.question_number}:</span> ${escapeHtml(item.question)}
+            </div>
+            <span class="text-[11px] px-2 py-0.5 rounded-full font-bold shrink-0 ${badgeCls}">
+              ${pct}% (${statusLabel})
+            </span>
+          </div>
+
+          <div class="w-full h-2 rounded-full bg-zinc-950 overflow-hidden">
+            <div class="h-full ${barCls} transition-all duration-500" style="width: ${pct}%"></div>
+          </div>
+
+          <div class="flex flex-wrap items-center justify-between gap-2 text-[11px] text-zinc-400">
+            <span>✅ ${item.correct_count} / ${item.total_attempts} students correct</span>
+            <span class="text-emerald-300/90 truncate max-w-[240px]" title="${escapeHtml(item.reference_answer)}">
+              Ans: ${escapeHtml(item.reference_answer)}
+            </span>
+          </div>
+          ${trapHtml}
+        </div>
+      `;
+    })
+    .join("");
+}
+
 function connectHostWebSocket(pin) {
   if (hostWs) hostWs.close();
   const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -565,6 +626,9 @@ function connectHostWebSocket(pin) {
         `
         )
         .join("");
+
+      renderTopicHeatmap(msg.topic_heatmap || [], "host-topic-heatmap");
+
       if (window.confetti) confetti({ particleCount: 90, spread: 75, origin: { y: 0.6 } });
     }
   };
@@ -618,21 +682,71 @@ async function viewMatchReport(pin) {
     const report = await safeFetchJson(`/api/host/reports/${encodeURIComponent(pin)}`);
     const modal = document.getElementById("report-modal");
     const body = document.getElementById("report-modal-body");
+
+    // Aggregate question accuracy from saved evaluations
+    const qMap = {};
+    (report.evaluations || []).forEach((ev) => {
+      if (ev.is_bot) return;
+      const qId = ev.question_id;
+      if (!qMap[qId]) {
+        qMap[qId] = {
+          question_number: qId,
+          question_id: qId,
+          question: `Question #${qId}`,
+          reference_answer: ev.evidence_from_source || "",
+          correct_count: 0,
+          total_attempts: 0,
+          wrongCounts: {},
+        };
+      }
+      qMap[qId].total_attempts += 1;
+      if (ev.awarded_marks >= ev.max_marks) {
+        qMap[qId].correct_count += 1;
+      } else {
+        const wrongAns = ev.submitted_answer || "No Answer";
+        qMap[qId].wrongCounts[wrongAns] = (qMap[qId].wrongCounts[wrongAns] || 0) + 1;
+      }
+    });
+
+    const savedHeatmap = Object.values(qMap)
+      .map((item) => {
+        const accuracy_pct = item.total_attempts
+          ? Math.round((item.correct_count / item.total_attempts) * 100)
+          : 0;
+        const wrongEntries = Object.entries(item.wrongCounts).sort((a, b) => b[1] - a[1]);
+        return {
+          ...item,
+          accuracy_pct,
+          most_common_wrong: wrongEntries.length ? wrongEntries[0][0] : null,
+        };
+      })
+      .sort((a, b) => a.accuracy_pct - b.accuracy_pct || a.question_number - b.question_number);
+
     body.innerHTML = `
       <div class="text-xs text-zinc-400 mb-3">Storage: ${report.storage} • Status: ${report.room.status}</div>
-      <div class="space-y-2 max-h-80 overflow-y-auto">
-        ${(report.evaluations || [])
-          .map(
-            (ev) => `
-            <div class="p-3 rounded-xl bg-zinc-900 border border-zinc-800 text-xs">
-              <strong>Q${ev.question_id} — ${escapeHtml(ev.player_name)} (${escapeHtml(ev.student_id)}):</strong>
-              ${escapeHtml(ev.submitted_answer)} • <span class="text-cyan-400">${ev.round_score} pts</span>
-            </div>
-          `
-          )
-          .join("")}
+      <div class="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
+        <div>
+          <h4 class="text-xs font-bold uppercase tracking-wider text-rose-300 mb-2">🌡️ Class Weakest Topic Heatmap</h4>
+          <div id="report-modal-heatmap" class="space-y-2"></div>
+        </div>
+        <div>
+          <h4 class="text-xs font-bold uppercase tracking-wider text-cyan-300 mb-2">📋 Individual Submissions</h4>
+          <div class="space-y-2">
+            ${(report.evaluations || [])
+              .map(
+                (ev) => `
+                <div class="p-3 rounded-xl bg-zinc-900 border border-zinc-800 text-xs">
+                  <strong>Q${ev.question_id} — ${escapeHtml(ev.player_name)} (${escapeHtml(ev.student_id)}):</strong>
+                  ${escapeHtml(ev.submitted_answer)} • <span class="text-cyan-400">${ev.round_score} pts</span>
+                </div>
+              `
+              )
+              .join("")}
+          </div>
+        </div>
       </div>
     `;
+    renderTopicHeatmap(savedHeatmap, "report-modal-heatmap");
     modal.classList.remove("hidden");
   } catch (err) {
     alert("Report Error: " + err.message);
