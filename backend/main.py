@@ -1,23 +1,35 @@
-import os
+import re
+import time
 import traceback
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 load_dotenv()
 
 from backend.ai_engine import evaluate_player_answer, generate_quiz_from_source
+from backend.auth import (
+    create_session_token,
+    hash_password,
+    require_host_auth,
+    verify_password,
+)
 from backend.database import (
+    create_host_account,
     get_database_status,
+    get_host_by_email,
     get_host_history,
+    get_host_login_logs,
     get_room_report,
     init_database,
+    record_host_login_log,
     save_published_quiz,
+    update_host_last_login,
 )
 from backend.doc_parser import extract_text_from_file
 from backend.game_manager import (
@@ -36,6 +48,8 @@ from backend.game_manager import (
 from backend.llm_router import LLMRouterError, get_model_label
 from backend.schemas import (
     GenerateQuizRequest,
+    HostLoginRequest,
+    HostRegisterRequest,
     PublishQuizRequest,
     RedemptionVerifyRequest,
     ReservePinRequest,
@@ -43,6 +57,14 @@ from backend.schemas import (
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = BASE_DIR / "static"
+EMAIL_REGEX = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _extract_client_meta(request: Request) -> tuple[str, str]:
+    forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    ip_addr = forwarded or (request.client.host if request.client else "unknown")
+    user_agent = request.headers.get("user-agent", "unknown")
+    return ip_addr, user_agent
 
 
 @asynccontextmanager
@@ -76,15 +98,92 @@ async def serve_host_studio():
     return FileResponse(str(STATIC_DIR / "host.html"))
 
 
-# ----------------- SYSTEM & DOCUMENT EXTRACTION -----------------
+# ----------------- SYSTEM & HOST AUTHENTICATION -----------------
 
 @app.get("/api/system/status")
 async def api_system_status():
     return get_database_status()
 
 
+@app.post("/api/auth/register")
+async def api_host_register(req: HostRegisterRequest, request: Request):
+    clean_email = req.email.strip().lower()
+    if not EMAIL_REGEX.match(clean_email):
+        raise HTTPException(status_code=400, detail="Please enter a valid email address.")
+
+    existing = await get_host_by_email(clean_email)
+    if existing:
+        raise HTTPException(status_code=409, detail="An account with this email already exists. Please Sign In.")
+
+    ip_addr, user_agent = _extract_client_meta(request)
+    pw_hash = hash_password(req.password)
+    host = await create_host_account(email=clean_email, name=req.name.strip(), password_hash=pw_hash)
+    await record_host_login_log(
+        email=host["email"],
+        name=host["name"],
+        event_type="REGISTER",
+        success=True,
+        ip_address=ip_addr,
+        user_agent=user_agent,
+    )
+    token = create_session_token(email=host["email"], name=host["name"])
+    return {
+        "token": token,
+        "host": {"email": host["email"], "name": host["name"]},
+    }
+
+
+@app.post("/api/auth/login")
+async def api_host_login(req: HostLoginRequest, request: Request):
+    clean_email = req.email.strip().lower()
+    ip_addr, user_agent = _extract_client_meta(request)
+    host = await get_host_by_email(clean_email)
+
+    if not host or not verify_password(req.password, host.get("password_hash", "")):
+        await record_host_login_log(
+            email=clean_email,
+            name=host.get("name", "Unknown") if host else "Unregistered",
+            event_type="LOGIN_FAILED",
+            success=False,
+            ip_address=ip_addr,
+            user_agent=user_agent,
+        )
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    await update_host_last_login(clean_email)
+    await record_host_login_log(
+        email=host["email"],
+        name=host["name"],
+        event_type="LOGIN_SUCCESS",
+        success=True,
+        ip_address=ip_addr,
+        user_agent=user_agent,
+    )
+    token = create_session_token(email=host["email"], name=host["name"])
+    return {
+        "token": token,
+        "host": {"email": host["email"], "name": host["name"]},
+    }
+
+
+@app.get("/api/auth/me")
+async def api_host_me(host: Dict[str, Any] = Depends(require_host_auth)):
+    return {"host": {"email": host["email"], "name": host["name"]}}
+
+
+@app.get("/api/auth/logs")
+async def api_host_login_logs(host: Dict[str, Any] = Depends(require_host_auth)):
+    logs = await get_host_login_logs(email=host["email"], limit=25)
+    return {"logs": logs}
+
+
+# ----------------- DOCUMENT EXTRACTION (PROTECTED) -----------------
+
 @app.post("/api/documents/extract")
-async def api_extract_document(file: UploadFile = File(...)):
+async def api_extract_document(
+    file: UploadFile = File(...),
+    host: Dict[str, Any] = Depends(require_host_auth),
+):
     try:
         raw_bytes = await file.read()
         extracted = extract_text_from_file(file.filename or "notes.txt", raw_bytes)
@@ -108,17 +207,23 @@ async def api_extract_document(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Failed to read file: {err}")
 
 
-# ----------------- HOST QUIZ AUTHORING & LOBBY -----------------
+# ----------------- HOST QUIZ AUTHORING & LOBBY (PROTECTED) -----------------
 
 @app.post("/api/rooms/reserve")
-async def api_reserve_pin(req: ReservePinRequest):
+async def api_reserve_pin(
+    req: ReservePinRequest,
+    host: Dict[str, Any] = Depends(require_host_auth),
+):
     pin = reserve_pin()
     est_sec = max(6, req.question_count * (2 if req.provider == "gemini" else 4))
     return {"game_pin": pin, "estimated_seconds": est_sec}
 
 
 @app.post("/api/quizzes/generate")
-async def api_generate_quiz(req: GenerateQuizRequest):
+async def api_generate_quiz(
+    req: GenerateQuizRequest,
+    host: Dict[str, Any] = Depends(require_host_auth),
+):
     try:
         quiz_data, model_label = await generate_quiz_from_source(
             provider=req.provider,
@@ -140,7 +245,10 @@ async def api_generate_quiz(req: GenerateQuizRequest):
 
 
 @app.post("/api/quizzes/publish")
-async def api_publish_quiz(req: PublishQuizRequest):
+async def api_publish_quiz(
+    req: PublishQuizRequest,
+    host: Dict[str, Any] = Depends(require_host_auth),
+):
     try:
         model_label = get_model_label(req.provider)
         questions_dicts = [q.model_dump() for q in req.questions]
@@ -158,13 +266,14 @@ async def api_publish_quiz(req: PublishQuizRequest):
         quiz_id = await save_published_quiz(
             game_pin=room.pin,
             title=req.title,
-            host_name=req.host_name,
+            host_name=req.host_name or host["name"],
             source_text=req.source_text,
             difficulty=req.difficulty,
             provider=req.provider,
             model_label=model_label,
             questions=questions_dicts,
             bots=req.bots,
+            host_email=host["email"],
         )
         room.quiz_id = quiz_id
         return {"game_pin": room.pin, "quiz_id": quiz_id}
@@ -173,7 +282,7 @@ async def api_publish_quiz(req: PublishQuizRequest):
         raise HTTPException(status_code=500, detail=f"Failed to publish quiz: {err}")
 
 
-# ----------------- PARTICIPANT JOIN CHECK & STATE SYNC -----------------
+# ----------------- PARTICIPANT JOIN CHECK & STATE SYNC (PUBLIC) -----------------
 
 @app.get("/api/rooms/{pin}/check")
 async def api_check_room(pin: str):
@@ -262,16 +371,16 @@ async def api_verify_redemption(req: RedemptionVerifyRequest):
         raise HTTPException(status_code=500, detail=str(err))
 
 
-# ----------------- HOST HISTORY & REPORTS -----------------
+# ----------------- HOST HISTORY & REPORTS (PROTECTED) -----------------
 
 @app.get("/api/host/history")
-async def api_host_history():
-    sessions = await get_host_history(limit=25)
+async def api_host_history(host: Dict[str, Any] = Depends(require_host_auth)):
+    sessions = await get_host_history(limit=25, host_email=host["email"])
     return {"sessions": sessions}
 
 
 @app.get("/api/host/reports/{pin}")
-async def api_host_report(pin: str):
+async def api_host_report(pin: str, host: Dict[str, Any] = Depends(require_host_auth)):
     report = await get_room_report(pin)
     if not report:
         raise HTTPException(status_code=404, detail="Match report not found.")
@@ -357,7 +466,6 @@ async def ws_player_endpoint(
         }
     )
 
-    # If a student joins mid-question, immediately sync the active question to them
     if room.status == "IN_PROGRESS" and 0 <= room.current_index < len(room.questions):
         q = room.questions[room.current_index]
         time_limit = int(q.get("time_limit", 20))

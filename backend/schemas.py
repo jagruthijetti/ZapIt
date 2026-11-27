@@ -6,6 +6,17 @@ DifficultyType = Literal["Easy", "Medium", "Hard"]
 BotPersonaType = Literal["speedrunner", "professor", "chaotic"]
 
 
+class HostRegisterRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=80)
+    email: str = Field(..., min_length=5, max_length=150)
+    password: str = Field(..., min_length=4, max_length=128)
+
+
+class HostLoginRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=150)
+    password: str = Field(..., min_length=4, max_length=128)
+
+
 class ReservePinRequest(BaseModel):
     provider: ProviderType = "gemini"
     question_count: int = Field(default=5, ge=1, le=30)

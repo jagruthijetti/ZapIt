@@ -38,11 +38,38 @@ async def _init_sqlite() -> None:
     async with aiosqlite.connect(str(SQLITE_PATH)) as db:
         await db.execute(
             """
+            CREATE TABLE IF NOT EXISTS hosts (
+                email TEXT PRIMARY KEY,
+                name TEXT,
+                password_hash TEXT,
+                login_count INTEGER DEFAULT 1,
+                created_at TEXT,
+                last_login TEXT
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS host_login_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT,
+                name TEXT,
+                event_type TEXT,
+                success INTEGER,
+                ip_address TEXT,
+                user_agent TEXT,
+                created_at TEXT
+            )
+            """
+        )
+        await db.execute(
+            """
             CREATE TABLE IF NOT EXISTS quizzes (
                 quiz_id TEXT PRIMARY KEY,
                 game_pin TEXT,
                 title TEXT,
                 host_name TEXT,
+                host_email TEXT,
                 source_text TEXT,
                 difficulty TEXT,
                 provider TEXT,
@@ -58,6 +85,7 @@ async def _init_sqlite() -> None:
                 game_pin TEXT PRIMARY KEY,
                 quiz_id TEXT,
                 title TEXT,
+                host_email TEXT,
                 difficulty TEXT,
                 model_label TEXT,
                 status TEXT,
@@ -101,6 +129,15 @@ async def _init_sqlite() -> None:
             )
             """
         )
+        for alter_sql in [
+            "ALTER TABLE hosts ADD COLUMN login_count INTEGER DEFAULT 1",
+            "ALTER TABLE quizzes ADD COLUMN host_email TEXT",
+            "ALTER TABLE game_rooms ADD COLUMN host_email TEXT",
+        ]:
+            try:
+                await db.execute(alter_sql)
+            except Exception:
+                pass
         await db.commit()
 
 
@@ -127,6 +164,136 @@ async def init_database() -> None:
     _db_status_label = "SQLite Local Fallback"
 
 
+# ----------------- HOST ACCOUNTS & LOGIN AUDIT LOGS -----------------
+
+async def get_host_by_email(email: str) -> Optional[Dict[str, Any]]:
+    clean_email = email.strip().lower()
+    if _use_mongo and _mongo_db is not None:
+        return await _mongo_db["hosts"].find_one({"email": clean_email}, {"_id": 0})
+
+    async with aiosqlite.connect(str(SQLITE_PATH)) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM hosts WHERE email = ?", (clean_email,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def create_host_account(email: str, name: str, password_hash: str) -> Dict[str, Any]:
+    clean_email = email.strip().lower()
+    clean_name = name.strip() or "Instructor"
+    now = _now_iso()
+    doc = {
+        "email": clean_email,
+        "name": clean_name,
+        "password_hash": password_hash,
+        "login_count": 1,
+        "created_at": now,
+        "last_login": now,
+    }
+
+    if _use_mongo and _mongo_db is not None:
+        await _mongo_db["hosts"].insert_one(dict(doc))
+    else:
+        async with aiosqlite.connect(str(SQLITE_PATH)) as db:
+            await db.execute(
+                """
+                INSERT INTO hosts (email, name, password_hash, login_count, created_at, last_login)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (clean_email, clean_name, password_hash, 1, now, now),
+            )
+            await db.commit()
+
+    return {"email": clean_email, "name": clean_name, "created_at": now}
+
+
+async def update_host_last_login(email: str) -> None:
+    clean_email = email.strip().lower()
+    now = _now_iso()
+    if _use_mongo and _mongo_db is not None:
+        await _mongo_db["hosts"].update_one(
+            {"email": clean_email},
+            {"$set": {"last_login": now}, "$inc": {"login_count": 1}},
+        )
+    else:
+        async with aiosqlite.connect(str(SQLITE_PATH)) as db:
+            await db.execute(
+                "UPDATE hosts SET last_login = ?, login_count = COALESCE(login_count, 0) + 1 WHERE email = ?",
+                (now, clean_email),
+            )
+            await db.commit()
+
+
+async def record_host_login_log(
+    email: str,
+    name: str,
+    event_type: str,  # "REGISTER" | "LOGIN_SUCCESS" | "LOGIN_FAILED"
+    success: bool,
+    ip_address: str = "unknown",
+    user_agent: str = "unknown",
+) -> None:
+    clean_email = email.strip().lower()
+    now = _now_iso()
+    log_doc = {
+        "email": clean_email,
+        "name": name.strip() or "Unknown",
+        "event_type": event_type,
+        "success": success,
+        "ip_address": ip_address[:64],
+        "user_agent": user_agent[:240],
+        "created_at": now,
+    }
+
+    if _use_mongo and _mongo_db is not None:
+        await _mongo_db["host_login_logs"].insert_one(dict(log_doc))
+    else:
+        async with aiosqlite.connect(str(SQLITE_PATH)) as db:
+            await db.execute(
+                """
+                INSERT INTO host_login_logs (email, name, event_type, success, ip_address, user_agent, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    log_doc["email"],
+                    log_doc["name"],
+                    log_doc["event_type"],
+                    1 if success else 0,
+                    log_doc["ip_address"],
+                    log_doc["user_agent"],
+                    now,
+                ),
+            )
+            await db.commit()
+
+
+async def get_host_login_logs(email: str, limit: int = 25) -> List[Dict[str, Any]]:
+    clean_email = email.strip().lower()
+    if _use_mongo and _mongo_db is not None:
+        cursor = (
+            _mongo_db["host_login_logs"]
+            .find({"email": clean_email}, {"_id": 0})
+            .sort("created_at", -1)
+            .limit(limit)
+        )
+        return await cursor.to_list(length=limit)
+
+    async with aiosqlite.connect(str(SQLITE_PATH)) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT email, name, event_type, success, ip_address, user_agent, created_at FROM host_login_logs WHERE email = ? ORDER BY id DESC LIMIT ?",
+            (clean_email, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                d["success"] = bool(d.get("success"))
+                out.append(d)
+            return out
+
+
+# ----------------- QUIZZES, ROOMS & EVALUATIONS -----------------
+
 async def save_published_quiz(
     game_pin: str,
     title: str,
@@ -137,15 +304,18 @@ async def save_published_quiz(
     model_label: str,
     questions: List[Dict[str, Any]],
     bots: List[str],
+    host_email: str = "",
 ) -> str:
     quiz_id = "qz_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
     created_at = _now_iso()
+    clean_email = host_email.strip().lower()
 
     quiz_doc = {
         "quiz_id": quiz_id,
         "game_pin": game_pin,
         "title": title,
         "host_name": host_name,
+        "host_email": clean_email,
         "source_text": source_text,
         "difficulty": difficulty,
         "provider": provider,
@@ -157,6 +327,7 @@ async def save_published_quiz(
         "game_pin": game_pin,
         "quiz_id": quiz_id,
         "title": title,
+        "host_email": clean_email,
         "difficulty": difficulty,
         "model_label": model_label,
         "status": "LOBBY",
@@ -171,14 +342,15 @@ async def save_published_quiz(
         async with aiosqlite.connect(str(SQLITE_PATH)) as db:
             await db.execute(
                 """
-                INSERT INTO quizzes (quiz_id, game_pin, title, host_name, source_text, difficulty, provider, model_label, questions_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO quizzes (quiz_id, game_pin, title, host_name, host_email, source_text, difficulty, provider, model_label, questions_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     quiz_id,
                     game_pin,
                     title,
                     host_name,
+                    clean_email,
                     source_text,
                     difficulty,
                     provider,
@@ -189,13 +361,14 @@ async def save_published_quiz(
             )
             await db.execute(
                 """
-                INSERT OR REPLACE INTO game_rooms (game_pin, quiz_id, title, difficulty, model_label, status, bots_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO game_rooms (game_pin, quiz_id, title, host_email, difficulty, model_label, status, bots_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     game_pin,
                     quiz_id,
                     title,
+                    clean_email,
                     difficulty,
                     model_label,
                     "LOBBY",
@@ -297,17 +470,22 @@ async def save_remediation_deck(
             await db.commit()
 
 
-async def get_host_history(limit: int = 25) -> List[Dict[str, Any]]:
+async def get_host_history(limit: int = 25, host_email: Optional[str] = None) -> List[Dict[str, Any]]:
+    clean_email = (host_email or "").strip().lower()
     if _use_mongo and _mongo_db is not None:
-        cursor = _mongo_db["game_rooms"].find({}, {"_id": 0}).sort("created_at", -1).limit(limit)
+        query = {"host_email": clean_email} if clean_email else {}
+        cursor = _mongo_db["game_rooms"].find(query, {"_id": 0}).sort("created_at", -1).limit(limit)
         return await cursor.to_list(length=limit)
 
     async with aiosqlite.connect(str(SQLITE_PATH)) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT game_pin, quiz_id, title, difficulty, model_label, status, created_at FROM game_rooms ORDER BY created_at DESC LIMIT ?",
-            (limit,),
-        ) as cursor:
+        if clean_email:
+            sql = "SELECT game_pin, quiz_id, title, difficulty, model_label, status, created_at FROM game_rooms WHERE host_email = ? ORDER BY created_at DESC LIMIT ?"
+            params = (clean_email, limit)
+        else:
+            sql = "SELECT game_pin, quiz_id, title, difficulty, model_label, status, created_at FROM game_rooms ORDER BY created_at DESC LIMIT ?"
+            params = (limit,)
+        async with db.execute(sql, params) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 

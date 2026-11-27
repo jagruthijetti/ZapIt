@@ -4,10 +4,14 @@ let generatedQuestions = [];
 let selectedBots = new Set();
 let genTimerInterval = null;
 let currentJoinUrl = "";
+let authMode = "login"; // "login" | "register"
+let hostToken = localStorage.getItem("zapit_host_token") || "";
+let currentHost = null;
 
 const TIMER_OPTIONS = [10, 15, 20, 30, 45, 60, 90];
 
 const ALL_HOST_VIEWS = [
+  "view-auth",
   "view-home",
   "view-create",
   "view-history",
@@ -19,7 +23,11 @@ const ALL_HOST_VIEWS = [
 ];
 
 async function safeFetchJson(url, options = {}) {
-  const res = await fetch(url, options);
+  const headers = { ...(options.headers || {}) };
+  if (hostToken) {
+    headers["Authorization"] = `Bearer ${hostToken}`;
+  }
+  const res = await fetch(url, { ...options, headers });
   const rawText = await res.text();
   let data = {};
   try {
@@ -27,11 +35,182 @@ async function safeFetchJson(url, options = {}) {
   } catch (_) {
     throw new Error(rawText || `Server error (HTTP ${res.status})`);
   }
+  if (res.status === 401 && !url.startsWith("/api/auth/")) {
+    logoutHost();
+    throw new Error(data.detail || "Session expired. Please sign in again.");
+  }
   if (!res.ok) {
     throw new Error(data.detail || `Request failed (HTTP ${res.status})`);
   }
   return data;
 }
+
+// ----------------- HOST AUTHENTICATION UI -----------------
+
+function switchAuthTab(mode) {
+  authMode = mode;
+  const loginTab = document.getElementById("tab-auth-login");
+  const regTab = document.getElementById("tab-auth-register");
+  const nameGroup = document.getElementById("auth-name-group");
+  const submitBtn = document.getElementById("btn-auth-submit");
+  const errBox = document.getElementById("auth-error-box");
+
+  if (errBox) errBox.classList.add("hidden");
+
+  if (mode === "register") {
+    loginTab?.classList.remove("bg-violet-600", "text-white");
+    loginTab?.classList.add("text-zinc-400");
+    regTab?.classList.add("bg-violet-600", "text-white");
+    regTab?.classList.remove("text-zinc-400");
+    nameGroup?.classList.remove("hidden");
+    if (submitBtn) submitBtn.innerText = "Create Account & Enter Studio →";
+  } else {
+    regTab?.classList.remove("bg-violet-600", "text-white");
+    regTab?.classList.add("text-zinc-400");
+    loginTab?.classList.add("bg-violet-600", "text-white");
+    loginTab?.classList.remove("text-zinc-400");
+    nameGroup?.classList.add("hidden");
+    if (submitBtn) submitBtn.innerText = "Sign In to Host Studio →";
+  }
+}
+
+async function submitHostAuth(event) {
+  event.preventDefault();
+  const errBox = document.getElementById("auth-error-box");
+  const submitBtn = document.getElementById("btn-auth-submit");
+  if (errBox) errBox.classList.add("hidden");
+
+  const email = (document.getElementById("auth-email")?.value || "").trim();
+  const password = document.getElementById("auth-password")?.value || "";
+  const name = (document.getElementById("auth-name")?.value || "").trim();
+
+  if (authMode === "register" && name.length < 2) {
+    if (errBox) {
+      errBox.innerText = "Please enter your name (at least 2 characters).";
+      errBox.classList.remove("hidden");
+    }
+    return;
+  }
+
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.innerText = authMode === "register" ? "Creating Account..." : "Signing In...";
+  }
+
+  try {
+    const endpoint = authMode === "register" ? "/api/auth/register" : "/api/auth/login";
+    const body = authMode === "register" ? { name, email, password } : { email, password };
+
+    const data = await safeFetchJson(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    hostToken = data.token;
+    localStorage.setItem("zapit_host_token", hostToken);
+    onHostAuthenticated(data.host);
+  } catch (err) {
+    if (errBox) {
+      errBox.innerText = err.message;
+      errBox.classList.remove("hidden");
+    }
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.innerText =
+        authMode === "register" ? "Create Account & Enter Studio →" : "Sign In to Host Studio →";
+    }
+  }
+}
+
+function onHostAuthenticated(host) {
+  currentHost = host;
+  const authNav = document.getElementById("host-auth-nav");
+  const userBadge = document.getElementById("host-user-badge");
+  const welcomeTag = document.getElementById("home-welcome-tag");
+  const hostNameInput = document.getElementById("host-name");
+
+  if (authNav) authNav.classList.remove("hidden");
+  if (userBadge) userBadge.innerText = `👩‍🏫 ${host.name} (${host.email})`;
+  if (welcomeTag) welcomeTag.innerText = `Welcome, ${host.name}`;
+  if (hostNameInput && host.name) hostNameInput.value = host.name;
+
+  showView("view-home");
+}
+
+function logoutHost() {
+  hostToken = "";
+  currentHost = null;
+  localStorage.removeItem("zapit_host_token");
+  if (hostWs) {
+    hostWs.close();
+    hostWs = null;
+  }
+  const authNav = document.getElementById("host-auth-nav");
+  if (authNav) authNav.classList.add("hidden");
+  showView("view-auth");
+}
+
+async function restoreHostSession() {
+  if (!hostToken) {
+    showView("view-auth");
+    return;
+  }
+  try {
+    const data = await safeFetchJson("/api/auth/me");
+    onHostAuthenticated(data.host);
+  } catch (_) {
+    logoutHost();
+  }
+}
+
+function navigateHostHome() {
+  if (!currentHost) {
+    showView("view-auth");
+  } else {
+    showView("view-home");
+  }
+}
+
+async function openLoginLogsModal() {
+  const modal = document.getElementById("logs-modal");
+  const body = document.getElementById("logs-modal-body");
+  if (!modal || !body) return;
+  body.innerHTML = `<p class="text-xs text-zinc-400 animate-pulse">Loading login audit logs...</p>`;
+  modal.classList.remove("hidden");
+
+  try {
+    const data = await safeFetchJson("/api/auth/logs");
+    const logs = data.logs || [];
+    body.innerHTML = logs.length
+      ? logs
+          .map(
+            (l) => `
+            <div class="p-3 rounded-xl bg-zinc-900 border ${
+              l.success ? "border-emerald-500/30" : "border-rose-500/30"
+            } text-xs space-y-1">
+              <div class="flex items-center justify-between">
+                <span class="font-bold ${l.success ? "text-emerald-400" : "text-rose-400"}">
+                  ${escapeHtml(l.event_type)}
+                </span>
+                <span class="text-zinc-400 font-mono">${escapeHtml(l.created_at)}</span>
+              </div>
+              <div class="text-zinc-300">
+                Email: <strong>${escapeHtml(l.email)}</strong> • IP: <span class="font-mono">${escapeHtml(l.ip_address)}</span>
+              </div>
+              <div class="text-[11px] text-zinc-500 truncate">${escapeHtml(l.user_agent)}</div>
+            </div>
+          `
+          )
+          .join("")
+      : `<p class="text-xs text-zinc-500">No login records found yet.</p>`;
+  } catch (err) {
+    body.innerHTML = `<p class="text-xs text-rose-400">Error loading logs: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+// ----------------- NAVIGATION & VIEW HELPERS -----------------
 
 function showGenError(message) {
   const box = document.getElementById("gen-error-box");
@@ -75,11 +254,19 @@ function showView(viewId) {
 }
 
 function openCreateView() {
+  if (!currentHost) {
+    showView("view-auth");
+    return;
+  }
   showGenError("");
   showView("view-create");
 }
 
 function openHistoryView() {
+  if (!currentHost) {
+    showView("view-auth");
+    return;
+  }
   showView("view-history");
   loadHostHistory();
 }
@@ -110,6 +297,7 @@ async function handleNotesFileUpload(event) {
 
     const res = await fetch("/api/documents/extract", {
       method: "POST",
+      headers: hostToken ? { Authorization: `Bearer ${hostToken}` } : {},
       body: formData,
     });
     const data = await res.json();
@@ -153,11 +341,6 @@ function toggleBot(persona, btn) {
 async function generateQuiz() {
   showGenError("");
 
-  if (location.protocol === "file:") {
-    showGenError("Please open http://localhost:8000/host in your browser instead of opening the HTML file directly.");
-    return;
-  }
-
   const titleEl = document.getElementById("quiz-title");
   const sourceEl = document.getElementById("quiz-source");
   const countEl = document.getElementById("quiz-count");
@@ -171,7 +354,7 @@ async function generateQuiz() {
   const questionCount = parseInt(countEl?.value || "5", 10) || 5;
   const difficulty = diffEl?.value || "Medium";
   const provider = provEl?.value || "gemini";
-  const hostName = (hostEl?.value || "Instructor").trim() || "Instructor";
+  const hostName = (hostEl?.value || currentHost?.name || "Instructor").trim() || "Instructor";
   const defaultTimeLimit = parseInt(timerEl?.value || "20", 10) || 20;
 
   if (title.length < 2) {
@@ -192,7 +375,6 @@ async function generateQuiz() {
   if (statusCard) statusCard.classList.remove("hidden");
 
   try {
-    // 1. Reserve 6-digit PIN immediately
     const reserveData = await safeFetchJson("/api/rooms/reserve", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -221,7 +403,6 @@ async function generateQuiz() {
       }
     }, 1000);
 
-    // 2. Generate MCQs with defaultTimeLimit
     const data = await safeFetchJson("/api/quizzes/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -394,7 +575,7 @@ async function publishQuiz() {
   const sourceText = document.getElementById("quiz-source").value.trim();
   const difficulty = document.getElementById("quiz-difficulty").value;
   const provider = document.getElementById("quiz-provider").value;
-  const hostName = (document.getElementById("host-name")?.value || "Instructor").trim() || "Instructor";
+  const hostName = (document.getElementById("host-name")?.value || currentHost?.name || "Instructor").trim() || "Instructor";
 
   const pubBtn = document.getElementById("btn-publish-quiz");
   if (pubBtn) {
@@ -434,67 +615,6 @@ async function publishQuiz() {
       pubBtn.innerText = "Open Lobby for Participants →";
     }
   }
-}
-
-function renderTopicHeatmap(heatmap, containerId = "host-topic-heatmap") {
-  const container = document.getElementById(containerId);
-  if (!container) return;
-
-  if (!heatmap || !heatmap.length) {
-    container.innerHTML = `<p class="text-xs text-zinc-500 p-4 rounded-2xl bg-zinc-950/70 border border-zinc-800">No human student responses recorded for heatmap analysis.</p>`;
-    return;
-  }
-
-  container.innerHTML = heatmap
-    .map((item) => {
-      const pct = item.accuracy_pct ?? 0;
-      let borderCls = "border-emerald-500/40 bg-emerald-500/5";
-      let barCls = "bg-emerald-400";
-      let badgeCls = "bg-emerald-500/20 text-emerald-300";
-      let statusLabel = "Mastered";
-
-      if (pct < 50) {
-        borderCls = "border-rose-500/50 bg-rose-500/10";
-        barCls = "bg-rose-500";
-        badgeCls = "bg-rose-500/20 text-rose-300";
-        statusLabel = "Needs Review";
-      } else if (pct < 80) {
-        borderCls = "border-amber-500/50 bg-amber-500/10";
-        barCls = "bg-amber-400";
-        badgeCls = "bg-amber-500/20 text-amber-300";
-        statusLabel = "Mixed";
-      }
-
-      const trapHtml = item.most_common_wrong
-        ? `<div class="text-[11px] text-rose-300/90 mt-1">⚠️ Top Misconception: <span class="font-medium">${escapeHtml(item.most_common_wrong)}</span></div>`
-        : "";
-
-      return `
-        <div class="p-3.5 rounded-2xl border ${borderCls} space-y-2">
-          <div class="flex items-start justify-between gap-2">
-            <div class="text-xs font-semibold text-zinc-100 leading-snug">
-              <span class="text-cyan-400 font-bold">Q${item.question_number}:</span> ${escapeHtml(item.question)}
-            </div>
-            <span class="text-[11px] px-2 py-0.5 rounded-full font-bold shrink-0 ${badgeCls}">
-              ${pct}% (${statusLabel})
-            </span>
-          </div>
-
-          <div class="w-full h-2 rounded-full bg-zinc-950 overflow-hidden">
-            <div class="h-full ${barCls} transition-all duration-500" style="width: ${pct}%"></div>
-          </div>
-
-          <div class="flex flex-wrap items-center justify-between gap-2 text-[11px] text-zinc-400">
-            <span>✅ ${item.correct_count} / ${item.total_attempts} students correct</span>
-            <span class="text-emerald-300/90 truncate max-w-[240px]" title="${escapeHtml(item.reference_answer)}">
-              Ans: ${escapeHtml(item.reference_answer)}
-            </span>
-          </div>
-          ${trapHtml}
-        </div>
-      `;
-    })
-    .join("");
 }
 
 function connectHostWebSocket(pin) {
@@ -626,9 +746,6 @@ function connectHostWebSocket(pin) {
         `
         )
         .join("");
-
-      renderTopicHeatmap(msg.topic_heatmap || [], "host-topic-heatmap");
-
       if (window.confetti) confetti({ particleCount: 90, spread: 75, origin: { y: 0.6 } });
     }
   };
@@ -671,7 +788,7 @@ async function loadHostHistory() {
           `
           )
           .join("")
-      : `<p class="text-xs text-zinc-500">No past sessions recorded yet.</p>`;
+      : `<p class="text-xs text-zinc-500">No past sessions recorded under your account yet.</p>`;
   } catch (err) {
     container.innerHTML = `<p class="text-xs text-rose-400">Could not load history: ${escapeHtml(err.message)}</p>`;
   }
@@ -682,71 +799,21 @@ async function viewMatchReport(pin) {
     const report = await safeFetchJson(`/api/host/reports/${encodeURIComponent(pin)}`);
     const modal = document.getElementById("report-modal");
     const body = document.getElementById("report-modal-body");
-
-    // Aggregate question accuracy from saved evaluations
-    const qMap = {};
-    (report.evaluations || []).forEach((ev) => {
-      if (ev.is_bot) return;
-      const qId = ev.question_id;
-      if (!qMap[qId]) {
-        qMap[qId] = {
-          question_number: qId,
-          question_id: qId,
-          question: `Question #${qId}`,
-          reference_answer: ev.evidence_from_source || "",
-          correct_count: 0,
-          total_attempts: 0,
-          wrongCounts: {},
-        };
-      }
-      qMap[qId].total_attempts += 1;
-      if (ev.awarded_marks >= ev.max_marks) {
-        qMap[qId].correct_count += 1;
-      } else {
-        const wrongAns = ev.submitted_answer || "No Answer";
-        qMap[qId].wrongCounts[wrongAns] = (qMap[qId].wrongCounts[wrongAns] || 0) + 1;
-      }
-    });
-
-    const savedHeatmap = Object.values(qMap)
-      .map((item) => {
-        const accuracy_pct = item.total_attempts
-          ? Math.round((item.correct_count / item.total_attempts) * 100)
-          : 0;
-        const wrongEntries = Object.entries(item.wrongCounts).sort((a, b) => b[1] - a[1]);
-        return {
-          ...item,
-          accuracy_pct,
-          most_common_wrong: wrongEntries.length ? wrongEntries[0][0] : null,
-        };
-      })
-      .sort((a, b) => a.accuracy_pct - b.accuracy_pct || a.question_number - b.question_number);
-
     body.innerHTML = `
       <div class="text-xs text-zinc-400 mb-3">Storage: ${report.storage} • Status: ${report.room.status}</div>
-      <div class="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
-        <div>
-          <h4 class="text-xs font-bold uppercase tracking-wider text-rose-300 mb-2">🌡️ Class Weakest Topic Heatmap</h4>
-          <div id="report-modal-heatmap" class="space-y-2"></div>
-        </div>
-        <div>
-          <h4 class="text-xs font-bold uppercase tracking-wider text-cyan-300 mb-2">📋 Individual Submissions</h4>
-          <div class="space-y-2">
-            ${(report.evaluations || [])
-              .map(
-                (ev) => `
-                <div class="p-3 rounded-xl bg-zinc-900 border border-zinc-800 text-xs">
-                  <strong>Q${ev.question_id} — ${escapeHtml(ev.player_name)} (${escapeHtml(ev.student_id)}):</strong>
-                  ${escapeHtml(ev.submitted_answer)} • <span class="text-cyan-400">${ev.round_score} pts</span>
-                </div>
-              `
-              )
-              .join("")}
-          </div>
-        </div>
+      <div class="space-y-2 max-h-80 overflow-y-auto">
+        ${(report.evaluations || [])
+          .map(
+            (ev) => `
+            <div class="p-3 rounded-xl bg-zinc-900 border border-zinc-800 text-xs">
+              <strong>Q${ev.question_id} — ${escapeHtml(ev.player_name)} (${escapeHtml(ev.student_id)}):</strong>
+              ${escapeHtml(ev.submitted_answer)} • <span class="text-cyan-400">${ev.round_score} pts</span>
+            </div>
+          `
+          )
+          .join("")}
       </div>
     `;
-    renderTopicHeatmap(savedHeatmap, "report-modal-heatmap");
     modal.classList.remove("hidden");
   } catch (err) {
     alert("Report Error: " + err.message);
@@ -762,3 +829,4 @@ function escapeHtml(str) {
 }
 
 loadSystemStatus();
+restoreHostSession();
