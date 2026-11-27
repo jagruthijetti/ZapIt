@@ -75,7 +75,7 @@ function switchAuthTab(mode) {
 }
 
 async function submitHostAuth(event) {
-  event.preventDefault();
+  if (event) event.preventDefault();
   const errBox = document.getElementById("auth-error-box");
   const submitBtn = document.getElementById("btn-auth-submit");
   if (errBox) errBox.classList.add("hidden");
@@ -83,6 +83,14 @@ async function submitHostAuth(event) {
   const email = (document.getElementById("auth-email")?.value || "").trim();
   const password = document.getElementById("auth-password")?.value || "";
   const name = (document.getElementById("auth-name")?.value || "").trim();
+
+  if (!email || !password) {
+    if (errBox) {
+      errBox.innerText = "Please enter both email address and password.";
+      errBox.classList.remove("hidden");
+    }
+    return;
+  }
 
   if (authMode === "register" && name.length < 2) {
     if (errBox) {
@@ -136,6 +144,7 @@ function onHostAuthenticated(host) {
   if (welcomeTag) welcomeTag.innerText = `Welcome, ${host.name}`;
   if (hostNameInput && host.name) hostNameInput.value = host.name;
 
+  // Navigate directly to Create Quiz / Check Match History chooser
   showView("view-home");
 }
 
@@ -174,6 +183,10 @@ function navigateHostHome() {
 }
 
 async function openLoginLogsModal() {
+  if (!currentHost) {
+    showView("view-auth");
+    return;
+  }
   const modal = document.getElementById("logs-modal");
   const body = document.getElementById("logs-modal-body");
   if (!modal || !body) return;
@@ -828,5 +841,68 @@ function escapeHtml(str) {
     .replace(/"/g, "&quot;");
 }
 
-loadSystemStatus();
-restoreHostSession();
+// Expose handlers globally for inline dynamic HTML calls
+window.switchAuthTab = switchAuthTab;
+window.submitHostAuth = submitHostAuth;
+window.logoutHost = logoutHost;
+window.navigateHostHome = navigateHostHome;
+window.openCreateView = openCreateView;
+window.openHistoryView = openHistoryView;
+window.openLoginLogsModal = openLoginLogsModal;
+window.showView = showView;
+window.removeStudioQuestion = removeStudioQuestion;
+window.renderStudioQuestions = renderStudioQuestions;
+window.viewMatchReport = viewMatchReport;
+
+function bindHostEventListeners() {
+  document.getElementById("brand-home-btn")?.addEventListener("click", navigateHostHome);
+  document.getElementById("tab-auth-login")?.addEventListener("click", () => switchAuthTab("login"));
+  document.getElementById("tab-auth-register")?.addEventListener("click", () => switchAuthTab("register"));
+  document.getElementById("host-auth-form")?.addEventListener("submit", submitHostAuth);
+
+  document.getElementById("nav-btn-create")?.addEventListener("click", openCreateView);
+  document.getElementById("nav-btn-history")?.addEventListener("click", openHistoryView);
+  document.getElementById("nav-btn-logs")?.addEventListener("click", openLoginLogsModal);
+  document.getElementById("nav-btn-logout")?.addEventListener("click", logoutHost);
+
+  document.getElementById("hub-btn-create")?.addEventListener("click", openCreateView);
+  document.getElementById("hub-btn-history")?.addEventListener("click", openHistoryView);
+
+  document.getElementById("create-back-btn")?.addEventListener("click", () => showView("view-home"));
+  document.getElementById("notes-file-input")?.addEventListener("change", handleNotesFileUpload);
+  document.getElementById("quiz-source")?.addEventListener("input", updateWordCount);
+  document.getElementById("btn-generate-quiz")?.addEventListener("click", generateQuiz);
+
+  document.querySelectorAll(".bot-toggle-btn").forEach((btn) => {
+    btn.addEventListener("click", () => toggleBot(btn.dataset.bot, btn));
+  });
+
+  document.getElementById("history-refresh-btn")?.addEventListener("click", loadHostHistory);
+  document.getElementById("history-back-btn")?.addEventListener("click", () => showView("view-home"));
+
+  document.getElementById("studio-add-q-btn")?.addEventListener("click", addStudioQuestion);
+  document.getElementById("studio-back-btn")?.addEventListener("click", () => showView("view-create"));
+  document.getElementById("btn-publish-quiz")?.addEventListener("click", publishQuiz);
+
+  document.getElementById("btn-copy-join-link")?.addEventListener("click", copyLobbyJoinLink);
+  document.getElementById("lobby-start-btn")?.addEventListener("click", () => sendHostAction("START_GAME"));
+
+  document.getElementById("q-end-early-btn")?.addEventListener("click", () => sendHostAction("END_QUESTION"));
+  document.getElementById("btn-next-q")?.addEventListener("click", () => sendHostAction("NEXT_QUESTION"));
+
+  document.getElementById("podium-create-btn")?.addEventListener("click", openCreateView);
+  document.getElementById("podium-history-btn")?.addEventListener("click", openHistoryView);
+
+  document.getElementById("close-report-modal-btn")?.addEventListener("click", () => {
+    document.getElementById("report-modal")?.classList.add("hidden");
+  });
+  document.getElementById("close-logs-modal-btn")?.addEventListener("click", () => {
+    document.getElementById("logs-modal")?.classList.add("hidden");
+  });
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  bindHostEventListeners();
+  loadSystemStatus();
+  restoreHostSession();
+});
