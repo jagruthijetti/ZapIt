@@ -268,6 +268,15 @@ async def api_check_room(pin: str):
 
 
 @app.get("/api/rooms/{pin}/state")
+@app.get("/api/rooms/{pin}/study-kit/{player_id}")
+async def api_get_player_study_kit(pin: str, player_id: str):
+    room = get_room(pin)
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found.")
+    kit = room.player_study_kits.get(player_id)
+    if not kit:
+        return {"ready": False}
+    return {"ready": True, "remediation_deck": kit}
 async def api_room_state_sync(pin: str, player_id: Optional[str] = Query(default=None)):
     room = get_room(pin)
     if not room:

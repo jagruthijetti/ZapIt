@@ -61,6 +61,8 @@ class GameRoom:
     auto_next_task: Optional[asyncio.Task] = None
     bot_tasks: List[asyncio.Task] = field(default_factory=list)
     round_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    topic_flashcards: List[Dict[str, Any]] = field(default_factory=list)
+    player_study_kits: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     def cancel_active_tasks(self) -> None:
         if self.round_task and not self.round_task.done():
@@ -167,6 +169,22 @@ def get_room(pin: str) -> Optional[GameRoom]:
     return _ROOMS.get((pin or "").strip())
 
 
+def _build_instant_topic_cards(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    cards = []
+    for q in questions[:6]:
+        explanations = q.get("option_explanations") or []
+        c_idx = int(q.get("correct_option_index", 0))
+        detail = explanations[c_idx] if 0 <= c_idx < len(explanations) else ""
+        cards.append(
+            {
+                "front": q.get("question", "Concept Review"),
+                "back": f"{q.get('reference_answer', '')} — {detail}".strip(" —"),
+                "tag": "Quiz Topic",
+            }
+        )
+    return cards
+
+
 def create_room(
     quiz_id: str,
     title: str,
@@ -194,6 +212,7 @@ def create_room(
         provider=provider,
         model_label=model_label,
         questions=questions,
+        topic_flashcards=_build_instant_topic_cards(questions),
     )
 
     for persona in bots:
@@ -222,7 +241,6 @@ def add_human_participant(
     clean_name = (name or "Player").strip()[:40] or "Player"
     clean_sid = (student_id or "STU-000").strip()[:30] or "STU-000"
 
-    # Reconnect existing participant with same student_id & name if they refreshed
     for existing in room.participants.values():
         if (
             not existing.is_bot
@@ -236,8 +254,6 @@ def add_human_participant(
         raise ValueError(f"Room {room.pin} is full ({MAX_PARTICIPANTS_PER_ROOM} participants max).")
 
     player_id = "plr_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
-
-    # Pick an emoji not yet used in this room so every player gets a distinct avatar
     used_avatars = {p.avatar for p in room.participants.values()}
     available_avatars = [a for a in AVATAR_POOL if a not in used_avatars]
     avatar = random.choice(available_avatars) if available_avatars else random.choice(AVATAR_POOL)
@@ -285,7 +301,6 @@ async def record_answer_submission(
     }
     await notify_answer_progress(room)
 
-    # If every participant in the room has answered, finish the round early
     if len(room.current_submissions) >= len(room.participants) and len(room.participants) > 0:
         asyncio.create_task(finish_round(room))
 
@@ -308,7 +323,6 @@ async def _simulate_bot_answer(room: GameRoom, bot: Participant, question: Dict[
     except asyncio.CancelledError:
         pass
     except Exception:
-        # Fallback random choice if bot LLM call fails
         await asyncio.sleep(2.0)
         if room.status == "IN_PROGRESS":
             await record_answer_submission(room, bot.player_id, random.randint(0, 3))
@@ -443,19 +457,19 @@ async def finish_round(room: GameRoom) -> None:
                 p.missed_questions.append(
                     {
                         "question": q["question"],
+                        "options": options,
+                        "correct_option_index": correct_idx,
                         "your_answer": submitted_label,
                         "correct_answer": reference_answer,
                         "explanation": micro_tutoring,
                     }
                 )
 
+            # Participant mid-quiz payload intentionally omits points and standings
             per_player_results[p.player_id] = {
                 "is_correct": is_correct,
                 "selected_option_index": sel_idx,
                 "submitted_answer": submitted_label,
-                "round_score": round_score,
-                "total_score": p.score,
-                "streak": p.streak,
                 "micro_tutoring": micro_tutoring,
             }
 
@@ -493,7 +507,6 @@ async def finish_round(room: GameRoom) -> None:
         await save_evaluations_batch(eval_records)
 
         leaderboard = room.get_leaderboard()
-        rank_map = {row["player_id"]: row["rank"] for row in leaderboard}
         is_last = (room.current_index + 1) >= len(room.questions)
 
         bot_banter = ""
@@ -507,7 +520,7 @@ async def finish_round(room: GameRoom) -> None:
             except Exception:
                 bot_banter = ""
 
-        # Send host view
+        # Host receives full standings & breakdown
         await room.send_to_host(
             {
                 "type": "ROUND_RESULT",
@@ -523,7 +536,7 @@ async def finish_round(room: GameRoom) -> None:
             }
         )
 
-        # Send personalized round outcome to each human participant
+        # Participants see ONLY their answer outcome & explanation (NO leaderboard, rank, or points mid-quiz)
         for p in list(room.participants.values()):
             if not p.is_bot and p.ws is not None:
                 res_info = per_player_results[p.player_id]
@@ -535,13 +548,7 @@ async def finish_round(room: GameRoom) -> None:
                             "total_questions": len(room.questions),
                             "correct_option_index": correct_idx,
                             "reference_answer": reference_answer,
-                            "your_result": {
-                                **res_info,
-                                "rank": rank_map.get(p.player_id, 1),
-                                "total_players": len(leaderboard),
-                            },
-                            "leaderboard": leaderboard,
-                            "bot_banter": bot_banter,
+                            "your_result": res_info,
                             "is_last_question": is_last,
                             "auto_next_seconds": AUTO_NEXT_SECONDS,
                         }
@@ -552,17 +559,79 @@ async def finish_round(room: GameRoom) -> None:
         room.auto_next_task = asyncio.create_task(_run_auto_next_countdown(room, room.current_index))
 
 
+def _build_fast_fallback_study_kit(room: GameRoom, p: Participant) -> Dict[str, Any]:
+    mistake_cards = []
+    practice_quiz = []
+
+    for m in p.missed_questions[:4]:
+        mistake_cards.append(
+            {
+                "front": m.get("question", "Missed Concept"),
+                "back": f"Correct Answer: {m.get('correct_answer', '')}. {m.get('explanation', '')}".strip(),
+                "tag": "Mistake Review",
+            }
+        )
+        opts = m.get("options") or []
+        if len(opts) == 4:
+            practice_quiz.append(
+                {
+                    "question": f"Retry Concept: {m.get('question', '')}",
+                    "options": opts,
+                    "correct_option_index": int(m.get("correct_option_index", 0)),
+                    "explanation": m.get("explanation", f"The correct answer is {m.get('correct_answer', '')}."),
+                }
+            )
+
+    summary = (
+        "Perfect score! Review the key topic flashcards below."
+        if not p.missed_questions
+        else f"You missed {len(p.missed_questions)} question(s). Flip the remediation cards and complete the mini-quiz below:"
+    )
+
+    return {
+        "summary": summary,
+        "topic_flashcards": room.topic_flashcards,
+        "flashcards": mistake_cards,
+        "remediation_quiz": practice_quiz,
+    }
+
+
 async def _deliver_player_study_kit(room: GameRoom, p: Participant) -> None:
-    if p.is_bot or p.ws is None:
+    if p.is_bot:
         return
+
+    # If the participant answered everything right, deliver immediately in <50ms without waiting on an LLM call
+    if not p.missed_questions:
+        deck_dict = _build_fast_fallback_study_kit(room, p)
+        room.player_study_kits[p.player_id] = deck_dict
+        if p.ws is not None:
+            try:
+                await p.ws.send_json({"type": "STUDY_KIT_READY", "remediation_deck": deck_dict})
+            except Exception:
+                p.ws = None
+        return
+
     try:
-        deck_obj, model_used = await generate_remediation_deck(
-            provider=room.provider,
-            source_text=room.source_text,
-            missed_questions=p.missed_questions,
-            all_questions=room.questions,
+        # Cap LLM generation at 6 seconds so participants never wait long
+        deck_obj, model_used = await asyncio.wait_for(
+            generate_remediation_deck(
+                provider=room.provider,
+                source_text=room.source_text[:3500],
+                missed_questions=p.missed_questions,
+                all_questions=room.questions,
+            ),
+            timeout=6.0,
         )
         deck_dict = deck_obj.model_dump()
+        if not deck_dict.get("topic_flashcards"):
+            deck_dict["topic_flashcards"] = room.topic_flashcards
+    except Exception:
+        deck_dict = _build_fast_fallback_study_kit(room, p)
+        model_used = "Fast Concept Kit"
+
+    room.player_study_kits[p.player_id] = deck_dict
+
+    try:
         await save_remediation_deck(
             game_pin=room.pin,
             player_id=p.player_id,
@@ -570,15 +639,19 @@ async def _deliver_player_study_kit(room: GameRoom, p: Participant) -> None:
             deck=deck_dict,
             model_used=model_used,
         )
-        if p.ws is not None:
+    except Exception:
+        pass
+
+    if p.ws is not None:
+        try:
             await p.ws.send_json(
                 {
                     "type": "STUDY_KIT_READY",
                     "remediation_deck": deck_dict,
                 }
             )
-    except Exception:
-        pass
+        except Exception:
+            p.ws = None
 
 
 async def _complete_match(room: GameRoom) -> None:
@@ -586,7 +659,6 @@ async def _complete_match(room: GameRoom) -> None:
     leaderboard = room.get_leaderboard()
     rank_map = {row["player_id"]: row["rank"] for row in leaderboard}
 
-    # 1. Immediately transition Host to Final Standings
     await room.send_to_host(
         {
             "type": "PODIUM",
@@ -596,7 +668,6 @@ async def _complete_match(room: GameRoom) -> None:
         }
     )
 
-    # 2. Immediately transition ALL Participants to Final Standings (never wait on LLM)
     for p in list(room.participants.values()):
         if not p.is_bot and p.ws is not None:
             try:
@@ -623,7 +694,6 @@ async def _complete_match(room: GameRoom) -> None:
     except Exception:
         pass
 
-    # 3. Generate & push personalized Topic Flashcards, Mistake Remediation & Mini-Quiz in parallel
     for p in list(room.participants.values()):
-        if not p.is_bot and p.ws is not None:
+        if not p.is_bot:
             asyncio.create_task(_deliver_player_study_kit(room, p))

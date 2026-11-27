@@ -8,6 +8,8 @@ let selectedOptionIndex = -1;
 let answerLocked = false;
 let currentOptions = [];
 let stateSyncInterval = null;
+let studyKitPollInterval = null;
+let studyKitLoaded = false;
 let practiceQuizData = [];
 
 const ALL_PLAYER_VIEWS = [
@@ -60,6 +62,27 @@ function fireSuccessConfetti() {
   });
 }
 
+function startStudyKitPoller() {
+  if (studyKitPollInterval) clearInterval(studyKitPollInterval);
+  studyKitPollInterval = setInterval(async () => {
+    if (studyKitLoaded || !currentPin || !myPlayerId) {
+      clearInterval(studyKitPollInterval);
+      return;
+    }
+    try {
+      const res = await fetch(
+        `/api/rooms/${encodeURIComponent(currentPin)}/study-kit/${encodeURIComponent(myPlayerId)}`
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.ready && data.remediation_deck) {
+        renderStudyKit(data.remediation_deck);
+        clearInterval(studyKitPollInterval);
+      }
+    } catch (_) {}
+  }, 1500);
+}
+
 function startStateSyncWatchdog() {
   if (stateSyncInterval) clearInterval(stateSyncInterval);
   stateSyncInterval = setInterval(async () => {
@@ -89,7 +112,7 @@ function startStateSyncWatchdog() {
         });
       }
     } catch (_) {}
-  }, 3000);
+  }, 2500);
 }
 
 async function handleJoinSubmit(event) {
@@ -127,6 +150,7 @@ async function handleJoinSubmit(event) {
 
     currentPin = pin;
     myName = name;
+    studyKitLoaded = false;
     connectPlayerWebSocket(pin, name, sid);
   } catch (err) {
     showJoinError(err.message);
@@ -242,29 +266,24 @@ function connectPlayerWebSocket(pin, name, sid) {
       showPlayerView("pview-result");
       const yr = msg.your_result || {};
       const isCorrect = Boolean(yr.is_correct);
-      const rank = yr.rank || 1;
-      const totalPlayers = yr.total_players || 1;
 
       updateHudBadge();
 
       const banner = document.getElementById("pres-banner");
       const icon = document.getElementById("pres-icon");
       const headline = document.getElementById("pres-headline");
-      const ptsLine = document.getElementById("pres-points-line");
 
       if (isCorrect) {
         banner.className = "p-5 rounded-2xl border border-emerald-500/50 bg-emerald-500/15 text-center space-y-1.5";
         icon.innerText = "🎉";
         headline.innerText = "Correct Answer!";
         headline.className = "font-display font-bold text-2xl text-emerald-300";
-        ptsLine.innerText = `Current Position: #${rank} of ${totalPlayers}`;
         fireSuccessConfetti();
       } else {
         banner.className = "p-5 rounded-2xl border border-rose-500/50 bg-rose-500/15 text-center space-y-1.5";
         icon.innerText = "❌";
         headline.innerText = yr.selected_option_index === -1 ? "Time's Up!" : "Incorrect Answer";
         headline.className = "font-display font-bold text-2xl text-rose-300";
-        ptsLine.innerText = `Current Position: #${rank} of ${totalPlayers}`;
       }
 
       document.getElementById("pres-your-choice").innerText = yr.submitted_answer || "No option selected";
@@ -273,23 +292,6 @@ function connectPlayerWebSocket(pin, name, sid) {
       document.getElementById("pres-next-countdown").innerText = msg.is_last_question
         ? `Final standings in ${msg.auto_next_seconds}s...`
         : `Next question in ${msg.auto_next_seconds}s...`;
-
-      document.getElementById("pres-leaderboard").innerHTML = (msg.leaderboard || [])
-        .map(
-          (p) => `
-          <div class="flex items-center justify-between px-4 py-2.5 rounded-xl ${
-            p.player_id === myPlayerId ? "bg-violet-600/25 border border-violet-500/50" : "bg-zinc-900 border border-zinc-800"
-          } text-sm">
-            <div class="flex items-center gap-2.5">
-              <span class="font-display font-bold text-zinc-400 w-6">#${p.rank}</span>
-              <span>${p.avatar}</span>
-              <span class="font-semibold">${escapeHtml(p.name)} ${p.player_id === myPlayerId ? "(You)" : ""}</span>
-            </div>
-            <span class="text-xs text-zinc-400 font-semibold">#${p.rank}</span>
-          </div>
-        `
-        )
-        .join("");
     }
 
     if (msg.type === "PODIUM") {
@@ -339,8 +341,9 @@ function renderFinalPodium(msg) {
 
   if (msg.remediation_deck) {
     renderStudyKit(msg.remediation_deck);
-  } else {
+  } else if (!studyKitLoaded) {
     document.getElementById("ppodium-study-loading")?.classList.remove("hidden");
+    startStudyKitPoller();
   }
 
   fireSuccessConfetti();
@@ -363,11 +366,13 @@ function renderFlipCardHtml(fc, accentBorderClass, accentTextClass) {
 }
 
 function renderStudyKit(deck) {
+  studyKitLoaded = true;
+  if (studyKitPollInterval) clearInterval(studyKitPollInterval);
+
   const loadingEl = document.getElementById("ppodium-study-loading");
   if (loadingEl) loadingEl.classList.add("hidden");
   if (!deck) return;
 
-  // 1. Topic Flashcards
   const topicBox = document.getElementById("ppodium-topic-cards-box");
   const topicList = document.getElementById("ppodium-topic-cards-list");
   const topicCards = Array.isArray(deck.topic_flashcards) ? deck.topic_flashcards : [];
@@ -378,7 +383,6 @@ function renderStudyKit(deck) {
       .join("");
   }
 
-  // 2. Mistake Remediation Flashcards
   const mistakeBox = document.getElementById("ppodium-flashcards-box");
   const mistakeList = document.getElementById("ppodium-flashcards-list");
   const mistakeCards = Array.isArray(deck.flashcards) ? deck.flashcards : [];
@@ -390,7 +394,6 @@ function renderStudyKit(deck) {
       .join("");
   }
 
-  // 3. Interactive Remediation Practice Quiz
   const practiceBox = document.getElementById("ppodium-practice-box");
   const practiceList = document.getElementById("ppodium-practice-list");
   practiceQuizData = Array.isArray(deck.remediation_quiz) ? deck.remediation_quiz : [];
@@ -430,7 +433,7 @@ function answerPracticeQuestion(qIdx, chosenIdx, btnEl) {
   const buttons = document.querySelectorAll(`.pq-opt-${qIdx}`);
   buttons.forEach((b) => (b.disabled = true));
 
-  const correctIdx = intVal(pq.correct_option_index);
+  const correctIdx = parseInt(pq.correct_option_index, 10) || 0;
   const isRight = chosenIdx === correctIdx;
 
   buttons.forEach((b, idx) => {
@@ -455,11 +458,6 @@ function answerPracticeQuestion(qIdx, chosenIdx, btnEl) {
       fb.innerText = `Not quite — ${pq.explanation || ""}`;
     }
   }
-}
-
-function intVal(v) {
-  const n = parseInt(v, 10);
-  return Number.isNaN(n) ? 0 : n;
 }
 
 function renderPlayerOptions(options, chosenIdx, isLocked) {
@@ -534,6 +532,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("join-room-form")?.addEventListener("submit", handleJoinSubmit);
   document.getElementById("btn-play-again")?.addEventListener("click", () => {
     if (stateSyncInterval) clearInterval(stateSyncInterval);
+    if (studyKitPollInterval) clearInterval(studyKitPollInterval);
     if (playerWs) playerWs.close();
     showPlayerView("pview-join");
   });
