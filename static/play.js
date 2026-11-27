@@ -1,7 +1,7 @@
 let playerWs = null;
 let myPlayerId = "";
 let myName = "";
-let myAvatar = "🦊";
+let myAvatar = "🐼";
 let currentPin = "";
 let currentQuestionId = null;
 let selectedOptionIndex = -1;
@@ -42,11 +42,11 @@ function showJoinError(msg) {
   }
 }
 
-function updateHudBadge(score) {
+function updateHudBadge() {
   const badge = document.getElementById("player-hud-badge");
   if (!badge) return;
   badge.classList.remove("hidden");
-  badge.innerText = `${myAvatar} ${myName} • ${score} pts`;
+  badge.innerText = `${myAvatar} ${myName}`;
 }
 
 function fireSuccessConfetti() {
@@ -125,7 +125,7 @@ function connectPlayerWebSocket(pin, name, sid) {
       myPlayerId = msg.player_id;
       myName = msg.name;
       myAvatar = msg.avatar || "🐼";
-      updateHudBadge(0);
+      updateHudBadge();
 
       document.getElementById("plobby-pin").innerText = pin;
       document.getElementById("plobby-avatar").innerText = myAvatar;
@@ -144,7 +144,7 @@ function connectPlayerWebSocket(pin, name, sid) {
         myAvatar = me.avatar;
         const avatarEl = document.getElementById("plobby-avatar");
         if (avatarEl) avatarEl.innerText = myAvatar;
-        updateHudBadge(me.score || 0);
+        updateHudBadge();
       }
 
       const countEl = document.getElementById("plobby-count");
@@ -164,7 +164,6 @@ function connectPlayerWebSocket(pin, name, sid) {
           .join("");
       }
     }
-    
 
     if (msg.type === "QUESTION_START") {
       currentQuestionId = msg.question_id;
@@ -208,12 +207,10 @@ function connectPlayerWebSocket(pin, name, sid) {
       showPlayerView("pview-result");
       const yr = msg.your_result || {};
       const isCorrect = Boolean(yr.is_correct);
-      const roundScore = yr.round_score || 0;
-      const totalScore = yr.total_score || 0;
       const rank = yr.rank || 1;
       const totalPlayers = yr.total_players || 1;
 
-      updateHudBadge(totalScore);
+      updateHudBadge();
 
       const banner = document.getElementById("pres-banner");
       const icon = document.getElementById("pres-icon");
@@ -225,14 +222,14 @@ function connectPlayerWebSocket(pin, name, sid) {
         icon.innerText = "🎉";
         headline.innerText = "Correct Answer!";
         headline.className = "font-display font-bold text-2xl text-emerald-300";
-        ptsLine.innerText = `+${roundScore} pts • Total: ${totalScore} pts • Rank #${rank} of ${totalPlayers}`;
+        ptsLine.innerText = `Current Position: #${rank} of ${totalPlayers}`;
         fireSuccessConfetti();
       } else {
         banner.className = "p-5 rounded-2xl border border-rose-500/50 bg-rose-500/15 text-center space-y-1.5";
         icon.innerText = "❌";
         headline.innerText = yr.selected_option_index === -1 ? "Time's Up!" : "Incorrect Answer";
         headline.className = "font-display font-bold text-2xl text-rose-300";
-        ptsLine.innerText = `+0 pts • Total: ${totalScore} pts • Rank #${rank} of ${totalPlayers}`;
+        ptsLine.innerText = `Current Position: #${rank} of ${totalPlayers}`;
       }
 
       document.getElementById("pres-your-choice").innerText = yr.submitted_answer || "No option selected";
@@ -253,7 +250,7 @@ function connectPlayerWebSocket(pin, name, sid) {
               <span>${p.avatar}</span>
               <span class="font-semibold">${escapeHtml(p.name)} ${p.player_id === myPlayerId ? "(You)" : ""}</span>
             </div>
-            <span class="font-display font-bold text-cyan-400">${p.score} pts</span>
+            <span class="text-xs text-zinc-400 font-semibold">#${p.rank}</span>
           </div>
         `
         )
@@ -263,7 +260,7 @@ function connectPlayerWebSocket(pin, name, sid) {
     if (msg.type === "PODIUM") {
       showPlayerView("pview-podium");
       const summary = msg.your_summary || {};
-      updateHudBadge(summary.score || 0);
+      updateHudBadge();
 
       document.getElementById("ppodium-personal-card").innerText =
         `You placed #${summary.rank || 1} of ${summary.total_players || 1} • ${summary.score || 0} pts (${summary.correct_count || 0}/${summary.total_questions || 0} Correct)`;
