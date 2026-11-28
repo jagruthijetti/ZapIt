@@ -429,7 +429,7 @@
     </section>
 
     <!-- VIEW 6: HOST FINAL PODIUM & LEADERBOARD -->
-    <section id="view-podium" class="hidden w-full max-w-3xl glass rounded-3xl p-8 space-y-6">
+    <section id="view-podium" class="hidden w-full max-w-4xl glass rounded-3xl p-8 space-y-6">
       <div class="text-center space-y-2">
         <span class="text-xs uppercase tracking-widest text-cyan-400 font-bold">Match Complete • Final Leaderboard</span>
         <h2 class="text-3xl font-bold">🏆 Final Class Standings</h2>
@@ -438,7 +438,14 @@
         </div>
       </div>
 
-      <div id="host-podium-list" class="space-y-2.5 max-h-96 overflow-y-auto pr-1"></div>
+      <div id="host-podium-list" class="space-y-2.5 max-h-80 overflow-y-auto pr-1"></div>
+
+      <div id="host-podium-heatmap" class="hidden pt-4 border-t border-zinc-800/80"></div>
+
+      <div class="flex flex-wrap items-center justify-center gap-3 pt-2">
+
+      <!-- PER-QUESTION ACCURACY HEATMAP ON FINAL PODIUM -->
+      <div id="host-podium-heatmap" class="hidden pt-4 border-t border-zinc-800/80"></div>
 
       <div class="flex flex-wrap items-center justify-center gap-3 pt-2">
         <button id="podium-create-btn" type="button" class="glow-btn px-7 py-3.5 rounded-2xl font-display font-bold text-white">
@@ -463,6 +470,6 @@
     </div>
   </div>
 
-  <script src="/static/host.js?v=2035"></script>
+  <script src="/static/host.js?v=2040"></script>
 </body>
 </html>

@@ -657,6 +657,17 @@ function renderHostPodium(board, totalQ) {
   }
 
   if (window.confetti) confetti({ particleCount: 95, spread: 75, origin: { y: 0.6 } });
+  if (currentActivePin) {
+    loadPodiumHeatmap(currentActivePin);
+  }
+  const podiumHeatmap = document.getElementById("host-podium-heatmap");
+  if (podiumHeatmap && currentActivePin) {
+    podiumHeatmap.classList.remove("hidden");
+    podiumHeatmap.innerHTML = `<p class="text-xs text-zinc-400 text-center animate-pulse">Loading question accuracy heatmap...</p>`;
+    renderReportHeatmapInto(currentActivePin, podiumHeatmap).catch((err) => {
+      podiumHeatmap.innerHTML = `<p class="text-xs text-rose-400 text-center">Could not load heatmap: ${escapeHtml(err.message)}</p>`;
+    });
+  }
 }
 
 function startHostStateWatchdog() {
@@ -859,190 +870,195 @@ async function loadHostHistory() {
   }
 }
 
-async function viewMatchReport(pin) {
-  try {
-    const report = await safeFetchJson(`/api/host/reports/${encodeURIComponent(pin)}`);
-    const modal = document.getElementById("report-modal");
-    const body = document.getElementById("report-modal-body");
+async function renderReportHeatmapInto(pin, targetEl) {
+  if (!targetEl || !pin) return;
+  const report = await safeFetchJson(`/api/host/reports/${encodeURIComponent(pin)}`);
 
-    const evaluations = report.evaluations || [];
-    const questions = report.room?.questions || [];
+  const evaluations = report.evaluations || [];
+  const questions = report.room?.questions || generatedQuestions || [];
 
-    // Group evaluations by question_id
-    const qMap = new Map();
-    questions.forEach((q, idx) => {
-      const qId = q.question_id || idx + 1;
+  // Group evaluations by question_id
+  const qMap = new Map();
+  questions.forEach((q, idx) => {
+    const qId = q.question_id || idx + 1;
+    qMap.set(qId, {
+      question_id: qId,
+      question: q.question || `Question #${qId}`,
+      reference_answer: q.reference_answer || "",
+      total: 0,
+      correct: 0,
+    });
+  });
+
+  // Group evaluations by student for the matrix heatmap
+  const studentMap = new Map();
+
+  evaluations.forEach((ev) => {
+    const qId = ev.question_id;
+    if (!qMap.has(qId)) {
       qMap.set(qId, {
         question_id: qId,
-        question: q.question || `Question #${qId}`,
-        reference_answer: q.reference_answer || "",
+        question: `Question #${qId}`,
+        reference_answer: "",
         total: 0,
         correct: 0,
       });
-    });
+    }
+    const stat = qMap.get(qId);
+    const isCorrect = Boolean(ev.is_correct ?? (ev.round_score > 0));
+    stat.total += 1;
+    if (isCorrect) stat.correct += 1;
 
-    // Group evaluations by student for the matrix heatmap
-    const studentMap = new Map();
+    const sKey = `${ev.student_id || ev.player_name}`;
+    if (!studentMap.has(sKey)) {
+      studentMap.set(sKey, {
+        name: ev.player_name || "Participant",
+        student_id: ev.student_id || "",
+        answers: {},
+        totalScore: 0,
+      });
+    }
+    const stu = studentMap.get(sKey);
+    stu.answers[qId] = { isCorrect, answer: ev.submitted_answer, score: ev.round_score || 0 };
+    stu.totalScore += ev.round_score || 0;
+  });
 
-    evaluations.forEach((ev) => {
-      const qId = ev.question_id;
-      if (!qMap.has(qId)) {
-        qMap.set(qId, {
-          question_id: qId,
-          question: `Question #${qId}`,
-          reference_answer: "",
-          total: 0,
-          correct: 0,
-        });
-      }
-      const stat = qMap.get(qId);
-      const isCorrect = Boolean(ev.is_correct ?? (ev.round_score > 0));
-      stat.total += 1;
-      if (isCorrect) stat.correct += 1;
+  const sortedStats = Array.from(qMap.values()).sort((a, b) => a.question_id - b.question_id);
+  const sortedStudents = Array.from(studentMap.values()).sort((a, b) => b.totalScore - a.totalScore);
 
-      const sKey = `${ev.student_id || ev.player_name}`;
-      if (!studentMap.has(sKey)) {
-        studentMap.set(sKey, {
-          name: ev.player_name || "Participant",
-          student_id: ev.student_id || "",
-          answers: {},
-          totalScore: 0,
-        });
-      }
-      const stu = studentMap.get(sKey);
-      stu.answers[qId] = { isCorrect, answer: ev.submitted_answer, score: ev.round_score || 0 };
-      stu.totalScore += ev.round_score || 0;
-    });
+  // 1. Build Question Accuracy Heatmap Tiles
+  const heatmapTilesHtml = sortedStats.length
+    ? sortedStats
+        .map((st) => {
+          const pct = st.total > 0 ? Math.round((st.correct / st.total) * 100) : 0;
+          let heatStyle = "bg-zinc-900 border-zinc-700 text-zinc-300";
+          let badgeLabel = "No Data";
 
-    const sortedStats = Array.from(qMap.values()).sort((a, b) => a.question_id - b.question_id);
-    const sortedStudents = Array.from(studentMap.values()).sort((a, b) => b.totalScore - a.totalScore);
-
-    // 1. Build Question Accuracy Heatmap Tiles
-    const heatmapTilesHtml = sortedStats.length
-      ? sortedStats
-          .map((st) => {
-            const pct = st.total > 0 ? Math.round((st.correct / st.total) * 100) : 0;
-            let heatStyle = "bg-zinc-900 border-zinc-700 text-zinc-300";
-            let badgeLabel = "No Data";
-
-            if (st.total > 0) {
-              if (pct >= 75) {
-                heatStyle = "bg-emerald-500/25 border-emerald-400/70 text-emerald-200";
-                badgeLabel = "Mastered";
-              } else if (pct >= 45) {
-                heatStyle = "bg-amber-500/25 border-amber-400/70 text-amber-200";
-                badgeLabel = "Review";
-              } else {
-                heatStyle = "bg-rose-500/30 border-rose-500/80 text-rose-200";
-                badgeLabel = "Re-teach";
-              }
+          if (st.total > 0) {
+            if (pct >= 75) {
+              heatStyle = "bg-emerald-500/25 border-emerald-400/70 text-emerald-200";
+              badgeLabel = "Mastered";
+            } else if (pct >= 45) {
+              heatStyle = "bg-amber-500/25 border-amber-400/70 text-amber-200";
+              badgeLabel = "Review";
+            } else {
+              heatStyle = "bg-rose-500/30 border-rose-500/80 text-rose-200";
+              badgeLabel = "Re-teach";
             }
+          }
 
-            return `
-              <div class="p-3 rounded-2xl border ${heatStyle} flex flex-col justify-between gap-1.5 transition hover:scale-[1.02]"
-                   title="${escapeHtml(st.question)}">
-                <div class="flex items-center justify-between text-[11px] font-bold">
-                  <span>Q${st.question_id}</span>
-                  <span>${pct}%</span>
-                </div>
-                <div class="w-full h-1.5 rounded-full bg-black/40 overflow-hidden">
-                  <div class="h-full bg-current" style="width: ${pct}%"></div>
-                </div>
-                <div class="text-[10px] opacity-85 truncate">${escapeHtml(st.question)}</div>
-                <div class="flex items-center justify-between text-[10px] opacity-75 pt-0.5">
-                  <span>${st.correct}/${st.total} right</span>
-                  <span class="uppercase font-semibold">${badgeLabel}</span>
-                </div>
+          return `
+            <div class="p-3 rounded-2xl border ${heatStyle} flex flex-col justify-between gap-1.5 transition hover:scale-[1.02]"
+                 title="${escapeHtml(st.question)}">
+              <div class="flex items-center justify-between text-[11px] font-bold">
+                <span>Q${st.question_id}</span>
+                <span>${pct}%</span>
               </div>
-            `;
-          })
-          .join("")
-      : `<p class="text-xs text-zinc-500 col-span-full">No question stats recorded.</p>`;
-
-    // 2. Build Student × Question Matrix Heatmap Table
-    const matrixHeaders = sortedStats
-      .map((st) => `<th class="px-2 py-1.5 text-center font-mono text-[11px] text-zinc-400">Q${st.question_id}</th>`)
-      .join("");
-
-    const matrixRows = sortedStudents
-      .map((stu) => {
-        const cells = sortedStats
-          .map((st) => {
-            const ans = stu.answers[st.question_id];
-            if (!ans) {
-              return `<td class="p-1 text-center"><span class="inline-block w-7 h-6 leading-6 rounded-md bg-zinc-800/80 text-zinc-500 text-[10px]">—</span></td>`;
-            }
-            const cellClass = ans.isCorrect
-              ? "bg-emerald-500/30 border border-emerald-500/60 text-emerald-200"
-              : "bg-rose-500/30 border border-rose-500/60 text-rose-200";
-            const icon = ans.isCorrect ? "✓" : "✕";
-            return `
-              <td class="p-1 text-center">
-                <span title="${escapeHtml(ans.answer)} (${ans.score} pts)"
-                      class="inline-block w-7 h-6 leading-6 rounded-md font-bold text-[11px] cursor-help ${cellClass}">
-                  ${icon}
-                </span>
-              </td>
-            `;
-          })
-          .join("");
-
-        return `
-          <tr class="border-t border-zinc-800/80 hover:bg-zinc-900/60">
-            <td class="px-2.5 py-1.5 text-xs font-semibold text-zinc-200 whitespace-nowrap">
-              ${escapeHtml(stu.name)}
-              <span class="text-[10px] text-zinc-500 font-normal">(${escapeHtml(stu.student_id)})</span>
-            </td>
-            ${cells}
-            <td class="px-2.5 py-1.5 text-right font-mono text-xs font-bold text-cyan-300">${stu.totalScore}</td>
-          </tr>
-        `;
-      })
-      .join("");
-
-    body.innerHTML = `
-      <div class="space-y-5 max-h-[75vh] overflow-y-auto pr-1">
-        <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-400">
-          <span>PIN: <strong class="text-cyan-300 font-mono">${escapeHtml(pin)}</strong> • Status: ${escapeHtml(report.room?.status || "")}</span>
-          <div class="flex items-center gap-3 text-[11px]">
-            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-emerald-500/50 inline-block"></span> ≥75% Mastered</span>
-            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-amber-500/50 inline-block"></span> 45–74% Review</span>
-            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-rose-500/50 inline-block"></span> &lt;45% Re-teach</span>
-          </div>
-        </div>
-
-        <div>
-          <h4 class="text-xs font-bold uppercase tracking-wider text-zinc-300 mb-2">🔥 Per-Question Accuracy Heatmap</h4>
-          <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2.5">
-            ${heatmapTilesHtml}
-          </div>
-        </div>
-
-        ${
-          sortedStudents.length
-            ? `
-          <div>
-            <h4 class="text-xs font-bold uppercase tracking-wider text-zinc-300 mb-2">📊 Participant × Question Matrix (Hover cell for answer)</h4>
-            <div class="overflow-x-auto rounded-2xl border border-zinc-800 bg-zinc-950/90">
-              <table class="w-full text-left border-collapse">
-                <thead>
-                  <tr class="bg-zinc-900/90">
-                    <th class="px-2.5 py-2 text-[11px] font-semibold text-zinc-400">Participant</th>
-                    ${matrixHeaders}
-                    <th class="px-2.5 py-2 text-right text-[11px] font-semibold text-cyan-300">Total</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${matrixRows}
-                </tbody>
-              </table>
+              <div class="w-full h-1.5 rounded-full bg-black/40 overflow-hidden">
+                <div class="h-full bg-current" style="width: ${pct}%"></div>
+              </div>
+              <div class="text-[10px] opacity-85 truncate">${escapeHtml(st.question)}</div>
+              <div class="flex items-center justify-between text-[10px] opacity-75 pt-0.5">
+                <span>${st.correct}/${st.total} right</span>
+                <span class="uppercase font-semibold">${badgeLabel}</span>
+              </div>
             </div>
-          </div>
-        `
-            : ""
-        }
+          `;
+        })
+        .join("")
+    : `<p class="text-xs text-zinc-500 col-span-full">No question stats recorded.</p>`;
+
+  // 2. Build Student × Question Matrix Heatmap Table
+  const matrixHeaders = sortedStats
+    .map((st) => `<th class="px-2 py-1.5 text-center font-mono text-[11px] text-zinc-400">Q${st.question_id}</th>`)
+    .join("");
+
+  const matrixRows = sortedStudents
+    .map((stu) => {
+      const cells = sortedStats
+        .map((st) => {
+          const ans = stu.answers[st.question_id];
+          if (!ans) {
+            return `<td class="p-1 text-center"><span class="inline-block w-7 h-6 leading-6 rounded-md bg-zinc-800/80 text-zinc-500 text-[10px]">—</span></td>`;
+          }
+          const cellClass = ans.isCorrect
+            ? "bg-emerald-500/30 border border-emerald-500/60 text-emerald-200"
+            : "bg-rose-500/30 border border-rose-500/60 text-rose-200";
+          const icon = ans.isCorrect ? "✓" : "✕";
+          return `
+            <td class="p-1 text-center">
+              <span title="${escapeHtml(ans.answer)} (${ans.score} pts)"
+                    class="inline-block w-7 h-6 leading-6 rounded-md font-bold text-[11px] cursor-help ${cellClass}">
+                ${icon}
+              </span>
+            </td>
+          `;
+        })
+        .join("");
+
+      return `
+        <tr class="border-t border-zinc-800/80 hover:bg-zinc-900/60">
+          <td class="px-2.5 py-1.5 text-xs font-semibold text-zinc-200 whitespace-nowrap">
+            ${escapeHtml(stu.name)}
+            <span class="text-[10px] text-zinc-500 font-normal">(${escapeHtml(stu.student_id)})</span>
+          </td>
+          ${cells}
+          <td class="px-2.5 py-1.5 text-right font-mono text-xs font-bold text-cyan-300">${stu.totalScore}</td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  targetEl.innerHTML = `
+    <div class="space-y-5 max-h-[75vh] overflow-y-auto pr-1 text-left">
+      <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-400">
+        <span>PIN: <strong class="text-cyan-300 font-mono">${escapeHtml(pin)}</strong> • Status: ${escapeHtml(report.room?.status || "")}</span>
+        <div class="flex items-center gap-3 text-[11px]">
+          <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-emerald-500/50 inline-block"></span> ≥75% Mastered</span>
+          <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-amber-500/50 inline-block"></span> 45–74% Review</span>
+          <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-rose-500/50 inline-block"></span> &lt;45% Re-teach</span>
+        </div>
       </div>
-    `;
+
+      <div>
+        <h4 class="text-xs font-bold uppercase tracking-wider text-zinc-300 mb-2">🔥 Per-Question Accuracy Heatmap</h4>
+        <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2.5">
+          ${heatmapTilesHtml}
+        </div>
+      </div>
+
+      ${
+        sortedStudents.length
+          ? `
+        <div>
+          <h4 class="text-xs font-bold uppercase tracking-wider text-zinc-300 mb-2">📊 Participant × Question Matrix (Hover cell for answer)</h4>
+          <div class="overflow-x-auto rounded-2xl border border-zinc-800 bg-zinc-950/90">
+            <table class="w-full text-left border-collapse">
+              <thead>
+                <tr class="bg-zinc-900/90">
+                  <th class="px-2.5 py-2 text-[11px] font-semibold text-zinc-400">Participant</th>
+                  ${matrixHeaders}
+                  <th class="px-2.5 py-2 text-right text-[11px] font-semibold text-cyan-300">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${matrixRows}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `
+          : ""
+      }
+    </div>
+  `;
+}
+
+async function viewMatchReport(pin) {
+  try {
+    const modal = document.getElementById("report-modal");
+    const body = document.getElementById("report-modal-body");
+    await renderReportHeatmapInto(pin, body);
     modal.classList.remove("hidden");
   } catch (err) {
     alert("Report Error: " + err.message);
@@ -1114,3 +1130,188 @@ document.addEventListener("DOMContentLoaded", () => {
   loadSystemStatus();
   restoreHostSession();
 });
+
+function buildAccuracyHeatmapHtml(report, pin) {
+  const evaluations = report.evaluations || [];
+  const questions = report.room?.questions || generatedQuestions || [];
+
+  const qMap = new Map();
+  questions.forEach((q, idx) => {
+    const qId = q.question_id || idx + 1;
+    qMap.set(qId, {
+      question_id: qId,
+      question: q.question || `Question #${qId}`,
+      total: 0,
+      correct: 0,
+    });
+  });
+
+  const studentMap = new Map();
+
+  evaluations.forEach((ev) => {
+    const qId = ev.question_id;
+    if (!qMap.has(qId)) {
+      qMap.set(qId, {
+        question_id: qId,
+        question: `Question #${qId}`,
+        total: 0,
+        correct: 0,
+      });
+    }
+    const stat = qMap.get(qId);
+    const isCorrect = Boolean(ev.is_correct ?? (ev.round_score > 0));
+    stat.total += 1;
+    if (isCorrect) stat.correct += 1;
+
+    const sKey = `${ev.student_id || ev.player_name}`;
+    if (!studentMap.has(sKey)) {
+      studentMap.set(sKey, {
+        name: ev.player_name || "Participant",
+        student_id: ev.student_id || "",
+        answers: {},
+        totalScore: 0,
+      });
+    }
+    const stu = studentMap.get(sKey);
+    stu.answers[qId] = { isCorrect, answer: ev.submitted_answer, score: ev.round_score || 0 };
+    stu.totalScore += ev.round_score || 0;
+  });
+
+  const sortedStats = Array.from(qMap.values()).sort((a, b) => a.question_id - b.question_id);
+  const sortedStudents = Array.from(studentMap.values()).sort((a, b) => b.totalScore - a.totalScore);
+
+  const heatmapTilesHtml = sortedStats.length
+    ? sortedStats
+        .map((st) => {
+          const pct = st.total > 0 ? Math.round((st.correct / st.total) * 100) : 0;
+          let heatStyle = "bg-zinc-900 border-zinc-700 text-zinc-300";
+          let badgeLabel = "No Data";
+
+          if (st.total > 0) {
+            if (pct >= 75) {
+              heatStyle = "bg-emerald-500/25 border-emerald-400/70 text-emerald-200";
+              badgeLabel = "Mastered";
+            } else if (pct >= 45) {
+              heatStyle = "bg-amber-500/25 border-amber-400/70 text-amber-200";
+              badgeLabel = "Review";
+            } else {
+              heatStyle = "bg-rose-500/30 border-rose-500/80 text-rose-200";
+              badgeLabel = "Re-teach";
+            }
+          }
+
+          return `
+            <div class="p-3 rounded-2xl border ${heatStyle} flex flex-col justify-between gap-1.5 transition hover:scale-[1.02]"
+                 title="${escapeHtml(st.question)}">
+              <div class="flex items-center justify-between text-[11px] font-bold">
+                <span>Q${st.question_id}</span>
+                <span>${pct}%</span>
+              </div>
+              <div class="w-full h-1.5 rounded-full bg-black/40 overflow-hidden">
+                <div class="h-full bg-current" style="width: ${pct}%"></div>
+              </div>
+              <div class="text-[10px] opacity-85 truncate">${escapeHtml(st.question)}</div>
+              <div class="flex items-center justify-between text-[10px] opacity-75 pt-0.5">
+                <span>${st.correct}/${st.total} right</span>
+                <span class="uppercase font-semibold">${badgeLabel}</span>
+              </div>
+            </div>
+          `;
+        })
+        .join("")
+    : `<p class="text-xs text-zinc-500 col-span-full">No question stats recorded.</p>`;
+
+  const matrixHeaders = sortedStats
+    .map((st) => `<th class="px-2 py-1.5 text-center font-mono text-[11px] text-zinc-400">Q${st.question_id}</th>`)
+    .join("");
+
+  const matrixRows = sortedStudents
+    .map((stu) => {
+      const cells = sortedStats
+        .map((st) => {
+          const ans = stu.answers[st.question_id];
+          if (!ans) {
+            return `<td class="p-1 text-center"><span class="inline-block w-7 h-6 leading-6 rounded-md bg-zinc-800/80 text-zinc-500 text-[10px]">—</span></td>`;
+          }
+          const cellClass = ans.isCorrect
+            ? "bg-emerald-500/30 border border-emerald-500/60 text-emerald-200"
+            : "bg-rose-500/30 border border-rose-500/60 text-rose-200";
+          const icon = ans.isCorrect ? "✓" : "✕";
+          return `
+            <td class="p-1 text-center">
+              <span title="${escapeHtml(ans.answer)} (${ans.score} pts)"
+                    class="inline-block w-7 h-6 leading-6 rounded-md font-bold text-[11px] cursor-help ${cellClass}">
+                ${icon}
+              </span>
+            </td>
+          `;
+        })
+        .join("");
+
+      return `
+        <tr class="border-t border-zinc-800/80 hover:bg-zinc-900/60">
+          <td class="px-2.5 py-1.5 text-xs font-semibold text-zinc-200 whitespace-nowrap">
+            ${escapeHtml(stu.name)}
+            <span class="text-[10px] text-zinc-500 font-normal">(${escapeHtml(stu.student_id)})</span>
+          </td>
+          ${cells}
+          <td class="px-2.5 py-1.5 text-right font-mono text-xs font-bold text-cyan-300">${stu.totalScore}</td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  return `
+    <div class="space-y-4">
+      <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-400">
+        <h4 class="text-xs font-bold uppercase tracking-wider text-zinc-200">🔥 Per-Question Accuracy Heatmap</h4>
+        <div class="flex items-center gap-3 text-[11px]">
+          <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-emerald-500/50 inline-block"></span> ≥75% Mastered</span>
+          <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-amber-500/50 inline-block"></span> 45–74% Review</span>
+          <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-rose-500/50 inline-block"></span> &lt;45% Re-teach</span>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2.5">
+        ${heatmapTilesHtml}
+      </div>
+
+      ${
+        sortedStudents.length
+          ? `
+        <div>
+          <h4 class="text-xs font-bold uppercase tracking-wider text-zinc-300 mb-2">📊 Participant × Question Matrix (Hover cell for answer)</h4>
+          <div class="overflow-x-auto rounded-2xl border border-zinc-800 bg-zinc-950/90">
+            <table class="w-full text-left border-collapse">
+              <thead>
+                <tr class="bg-zinc-900/90">
+                  <th class="px-2.5 py-2 text-[11px] font-semibold text-zinc-400">Participant</th>
+                  ${matrixHeaders}
+                  <th class="px-2.5 py-2 text-right text-[11px] font-semibold text-cyan-300">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${matrixRows}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `
+          : ""
+      }
+    </div>
+  `;
+}
+
+async function loadPodiumHeatmap(pin) {
+  const container = document.getElementById("host-podium-heatmap");
+  if (!container || !pin) return;
+  container.classList.remove("hidden");
+  container.innerHTML = `<p class="text-xs text-zinc-400 text-center animate-pulse">Loading question accuracy heatmap...</p>`;
+  try {
+    const report = await safeFetchJson(`/api/host/reports/${encodeURIComponent(pin)}`);
+    container.innerHTML = buildAccuracyHeatmapHtml(report, pin);
+  } catch (err) {
+    container.innerHTML = `<p class="text-xs text-rose-400 text-center">Could not load heatmap: ${escapeHtml(err.message)}</p>`;
+  }
+}
