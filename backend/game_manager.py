@@ -535,7 +535,7 @@ async def finish_round(room: GameRoom) -> None:
             }
         )
 
-        # Participants see ONLY their answer outcome & explanation (NO leaderboard, rank, or points mid-quiz)
+        # Participants see ONLY their answer outcome & explanation mid-quiz
         for p in list(room.participants.values()):
             if not p.is_bot and p.ws is not None:
                 res_info = per_player_results[p.player_id]
@@ -555,7 +555,6 @@ async def finish_round(room: GameRoom) -> None:
                 except Exception:
                     p.ws = None
 
-        # Pre-warm each player's study kit during the 6s countdown after the final question
         if is_last:
             for p in list(room.participants.values()):
                 if not p.is_bot:
@@ -570,7 +569,6 @@ def _build_practice_questions_from_pool(
 ) -> List[Dict[str, Any]]:
     practice_quiz: List[Dict[str, Any]] = []
 
-    # 1. Prioritize concepts from questions the participant missed
     for m in p.missed_questions[:4]:
         opts = m.get("options") or []
         if len(opts) == 4:
@@ -583,7 +581,6 @@ def _build_practice_questions_from_pool(
                 }
             )
 
-    # 2. If the participant had 0 mistakes (or fewer than 2), add bonus mastery questions from the quiz
     if len(practice_quiz) < 2:
         existing_texts = {pq["question"] for pq in practice_quiz}
         for q in room.questions:
@@ -592,7 +589,11 @@ def _build_practice_questions_from_pool(
             if len(opts) == 4 and candidate_q not in existing_texts:
                 explanations = q.get("option_explanations") or []
                 c_idx = int(q.get("correct_option_index", 0))
-                expl = explanations[c_idx] if 0 <= c_idx < len(explanations) else f"Correct answer: {q.get('reference_answer', '')}"
+                expl = (
+                    explanations[c_idx]
+                    if 0 <= c_idx < len(explanations)
+                    else f"Correct answer: {q.get('reference_answer', '')}"
+                )
                 practice_quiz.append(
                     {
                         "question": candidate_q,
@@ -679,11 +680,13 @@ async def _prewarm_player_study_kit(room: GameRoom, p: Participant) -> None:
         except Exception:
             p.ws = None
 
+
 async def _complete_match(room: GameRoom) -> None:
     room.status = "COMPLETED"
     leaderboard = room.get_leaderboard()
     rank_map = {row["player_id"]: row["rank"] for row in leaderboard}
 
+    # Broadcast final standings to Host immediately
     await room.send_to_host(
         {
             "type": "PODIUM",

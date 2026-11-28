@@ -1,4 +1,6 @@
 let hostWs = null;
+let hostStateWatchdog = null;
+let currentActivePin = "";
 let reservedPin = null;
 let generatedQuestions = [];
 let selectedBots = new Set();
@@ -151,6 +153,10 @@ function logoutHost() {
   hostToken = "";
   currentHost = null;
   localStorage.removeItem("zapit_host_token");
+  if (hostStateWatchdog) {
+    clearInterval(hostStateWatchdog);
+    hostStateWatchdog = null;
+  }
   if (hostWs) {
     hostWs.close();
     hostWs = null;
@@ -174,6 +180,10 @@ async function restoreHostSession() {
 }
 
 function navigateHostHome() {
+  if (hostStateWatchdog) {
+    clearInterval(hostStateWatchdog);
+    hostStateWatchdog = null;
+  }
   if (!currentHost) {
     showView("view-auth");
   } else {
@@ -571,12 +581,14 @@ async function publishQuiz() {
     });
 
     const activePin = data.game_pin;
+    currentActivePin = activePin;
     document.getElementById("lobby-pin").innerText = activePin;
     document.getElementById("lobby-quiz-title").innerText = title;
     document.getElementById("lobby-join-url").innerText = `${location.origin}/`;
     renderLobbyQrCode(activePin);
 
     connectHostWebSocket(activePin);
+    startHostStateWatchdog();
     showView("view-lobby");
   } catch (err) {
     alert("Publish Error: " + err.message);
@@ -586,6 +598,84 @@ async function publishQuiz() {
       pubBtn.innerText = "Open Lobby for Participants →";
     }
   }
+}
+
+function renderHostPodium(board, totalQ) {
+  showView("view-podium");
+  const rows = Array.isArray(board) ? board : [];
+  const qCount = totalQ || generatedQuestions.length || 0;
+  const winnerBanner = document.getElementById("host-winner-banner");
+  const podiumList = document.getElementById("host-podium-list");
+
+  if (winnerBanner) {
+    if (rows.length > 0) {
+      const top = rows[0];
+      winnerBanner.innerText = `🥇 Winner: ${top.avatar || "🏆"} ${top.name} — ${top.score || 0} pts`;
+      winnerBanner.classList.remove("hidden");
+    } else {
+      winnerBanner.classList.add("hidden");
+    }
+  }
+
+  if (podiumList) {
+    const medals = ["🥇", "🥈", "🥉"];
+    podiumList.innerHTML = rows.length
+      ? rows
+          .map((p, idx) => {
+            const medal = medals[idx] || `#${p.rank}`;
+            const rowStyle =
+              idx === 0
+                ? "bg-amber-500/15 border border-amber-400/60 shadow-lg shadow-amber-500/10"
+                : idx === 1
+                ? "bg-violet-600/20 border border-violet-500/40"
+                : idx === 2
+                ? "bg-cyan-500/15 border border-cyan-500/35"
+                : "bg-zinc-900 border border-zinc-800";
+
+            const correctBadge =
+              qCount > 0 ? ` • ${p.correct_count || 0}/${qCount} Correct` : "";
+
+            return `
+              <div class="flex items-center justify-between px-4 py-3.5 rounded-2xl ${rowStyle}">
+                <div class="flex items-center gap-3">
+                  <span class="font-display font-bold text-lg w-8 text-center">${medal}</span>
+                  <span class="text-2xl">${p.avatar || "🦊"}</span>
+                  <div>
+                    <div class="font-bold text-sm text-white">${escapeHtml(p.name)}</div>
+                    <div class="text-[11px] text-zinc-400">${escapeHtml(p.student_id || "")}${correctBadge}</div>
+                  </div>
+                </div>
+                <div class="text-right">
+                  <div class="font-display font-bold text-base text-cyan-300">${p.score || 0} pts</div>
+                  <div class="text-[10px] uppercase tracking-wider text-zinc-400">Rank #${p.rank}</div>
+                </div>
+              </div>
+            `;
+          })
+          .join("")
+      : `<p class="text-xs text-zinc-400 text-center py-4">No participant scores recorded for this match.</p>`;
+  }
+
+  if (window.confetti) confetti({ particleCount: 95, spread: 75, origin: { y: 0.6 } });
+}
+
+function startHostStateWatchdog() {
+  if (hostStateWatchdog) clearInterval(hostStateWatchdog);
+  hostStateWatchdog = setInterval(async () => {
+    if (!currentActivePin) return;
+    const podiumVisible = !document.getElementById("view-podium")?.classList.contains("hidden");
+    if (podiumVisible) {
+      clearInterval(hostStateWatchdog);
+      return;
+    }
+    try {
+      const state = await safeFetchJson(`/api/rooms/${encodeURIComponent(currentActivePin)}/state`);
+      if (state.status === "COMPLETED" && Array.isArray(state.leaderboard)) {
+        renderHostPodium(state.leaderboard, state.total_questions);
+        clearInterval(hostStateWatchdog);
+      }
+    } catch (_) {}
+  }, 2000);
 }
 
 function connectHostWebSocket(pin) {
@@ -697,62 +787,8 @@ function connectHostWebSocket(pin) {
     }
 
     if (msg.type === "PODIUM") {
-      showView("view-podium");
-      const board = msg.leaderboard || [];
-      const totalQ = msg.total_questions || generatedQuestions.length || 0;
-      const winnerBanner = document.getElementById("host-winner-banner");
-      const podiumList = document.getElementById("host-podium-list");
-
-      if (winnerBanner) {
-        if (board.length > 0) {
-          const top = board[0];
-          winnerBanner.innerText = `🥇 Winner: ${top.avatar || "🏆"} ${top.name} — ${top.score} pts`;
-          winnerBanner.classList.remove("hidden");
-        } else {
-          winnerBanner.classList.add("hidden");
-        }
-      }
-
-      if (podiumList) {
-        const medals = ["🥇", "🥈", "🥉"];
-        podiumList.innerHTML = board.length
-          ? board
-              .map((p, idx) => {
-                const medal = medals[idx] || `#${p.rank}`;
-                const rowStyle =
-                  idx === 0
-                    ? "bg-amber-500/15 border border-amber-400/60 shadow-lg shadow-amber-500/10"
-                    : idx === 1
-                    ? "bg-violet-600/20 border border-violet-500/40"
-                    : idx === 2
-                    ? "bg-cyan-500/15 border border-cyan-500/35"
-                    : "bg-zinc-900 border border-zinc-800";
-
-                const correctBadge =
-                  totalQ > 0 ? ` • ${p.correct_count || 0}/${totalQ} Correct` : "";
-
-                return `
-                  <div class="flex items-center justify-between px-4 py-3.5 rounded-2xl ${rowStyle}">
-                    <div class="flex items-center gap-3">
-                      <span class="font-display font-bold text-lg w-8 text-center">${medal}</span>
-                      <span class="text-2xl">${p.avatar || "🦊"}</span>
-                      <div>
-                        <div class="font-bold text-sm text-white">${escapeHtml(p.name)}</div>
-                        <div class="text-[11px] text-zinc-400">${escapeHtml(p.student_id || "")}${correctBadge}</div>
-                      </div>
-                    </div>
-                    <div class="text-right">
-                      <div class="font-display font-bold text-base text-cyan-300">${p.score || 0} pts</div>
-                      <div class="text-[10px] uppercase tracking-wider text-zinc-400">Rank #${p.rank}</div>
-                    </div>
-                  </div>
-                `;
-              })
-              .join("")
-          : `<p class="text-xs text-zinc-400 text-center py-4">No participant scores recorded for this match.</p>`;
-      }
-
-      if (window.confetti) confetti({ particleCount: 95, spread: 75, origin: { y: 0.6 } });
+      if (hostStateWatchdog) clearInterval(hostStateWatchdog);
+      renderHostPodium(msg.leaderboard || [], msg.total_questions || generatedQuestions.length);
     }
   };
 }
@@ -859,29 +895,27 @@ function bindHostEventListeners() {
   document.getElementById("hub-btn-history")?.addEventListener("click", openHistoryView);
 
   document.getElementById("create-back-btn")?.addEventListener("click", () => showView("view-home"));
-  document.getElementById("notes-file-input")?.addEventListener("change", handleNotesFileUpload);
   document.getElementById("quiz-source")?.addEventListener("input", updateWordCount);
+  document.getElementById("notes-file-input")?.addEventListener("change", handleNotesFileUpload);
   document.getElementById("btn-generate-quiz")?.addEventListener("click", generateQuiz);
 
   document.querySelectorAll(".bot-toggle-btn").forEach((btn) => {
     btn.addEventListener("click", () => toggleBot(btn.dataset.bot, btn));
   });
 
-  document.getElementById("history-refresh-btn")?.addEventListener("click", loadHostHistory);
-  document.getElementById("history-back-btn")?.addEventListener("click", () => showView("view-home"));
-
-  document.getElementById("studio-add-q-btn")?.addEventListener("click", addStudioQuestion);
   document.getElementById("studio-back-btn")?.addEventListener("click", () => showView("view-create"));
+  document.getElementById("studio-add-q-btn")?.addEventListener("click", addStudioQuestion);
   document.getElementById("btn-publish-quiz")?.addEventListener("click", publishQuiz);
 
   document.getElementById("btn-copy-join-link")?.addEventListener("click", copyLobbyJoinLink);
-  document.getElementById("lobby-start-btn")?.addEventListener("click", () => sendHostAction("START_GAME"));
-
-  document.getElementById("q-end-early-btn")?.addEventListener("click", () => sendHostAction("END_QUESTION"));
+  document.getElementById("lobby-start-btn")?.addEventListener("click", () => sendHostAction("START_MATCH"));
+  document.getElementById("q-end-early-btn")?.addEventListener("click", () => sendHostAction("END_ROUND_EARLY"));
   document.getElementById("btn-next-q")?.addEventListener("click", () => sendHostAction("NEXT_QUESTION"));
 
-  document.getElementById("podium-create-btn")?.addEventListener("click", openCreateView);
+  document.getElementById("history-refresh-btn")?.addEventListener("click", loadHostHistory);
+  document.getElementById("history-back-btn")?.addEventListener("click", () => showView("view-home"));
   document.getElementById("podium-history-btn")?.addEventListener("click", openHistoryView);
+  document.getElementById("podium-create-btn")?.addEventListener("click", openCreateView);
 
   document.getElementById("close-report-modal-btn")?.addEventListener("click", () => {
     document.getElementById("report-modal")?.classList.add("hidden");
