@@ -678,13 +678,32 @@ function startHostStateWatchdog() {
   }, 2000);
 }
 
-function connectHostWebSocket(pin) {
-  if (hostWs) hostWs.close();
+function connectHostWebSocket(pin, onOpenAction = null) {
+  if (hostWs) {
+    hostWs.onclose = null;
+    hostWs.close();
+  }
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  hostWs = new WebSocket(`${proto}://${location.host}/ws/${encodeURIComponent(pin)}/host`);
+  const tokenQuery = hostToken ? `?token=${encodeURIComponent(hostToken)}` : "";
+  hostWs = new WebSocket(`${proto}://${location.host}/ws/${encodeURIComponent(pin)}/host${tokenQuery}`);
+
+  hostWs.onopen = () => {
+    if (onOpenAction) {
+      hostWs.send(JSON.stringify({ action: onOpenAction }));
+    }
+  };
+
+  hostWs.onerror = (err) => {
+    console.error("Host WebSocket error:", err);
+  };
 
   hostWs.onmessage = (event) => {
     const msg = JSON.parse(event.data);
+
+    if (msg.type === "ERROR") {
+      alert(msg.message || msg.detail || "Action could not be completed.");
+      return;
+    }
 
     if (msg.type === "LOBBY_UPDATE") {
       const players = msg.players || [];
@@ -796,6 +815,10 @@ function connectHostWebSocket(pin) {
 function sendHostAction(action) {
   if (hostWs && hostWs.readyState === WebSocket.OPEN) {
     hostWs.send(JSON.stringify({ action }));
+    return;
+  }
+  if (currentActivePin) {
+    connectHostWebSocket(currentActivePin, action);
   }
 }
 
