@@ -564,10 +564,51 @@ async def finish_round(room: GameRoom) -> None:
         room.auto_next_task = asyncio.create_task(_run_auto_next_countdown(room, room.current_index))
 
 
+def _build_practice_questions_from_pool(
+    room: GameRoom,
+    p: Participant,
+) -> List[Dict[str, Any]]:
+    practice_quiz: List[Dict[str, Any]] = []
+
+    # 1. Prioritize concepts from questions the participant missed
+    for m in p.missed_questions[:4]:
+        opts = m.get("options") or []
+        if len(opts) == 4:
+            practice_quiz.append(
+                {
+                    "question": f"Concept Check: {m.get('question', '')}",
+                    "options": opts,
+                    "correct_option_index": int(m.get("correct_option_index", 0)),
+                    "explanation": m.get("explanation", f"The correct answer is {m.get('correct_answer', '')}."),
+                }
+            )
+
+    # 2. If the participant had 0 mistakes (or fewer than 2), add bonus mastery questions from the quiz
+    if len(practice_quiz) < 2:
+        existing_texts = {pq["question"] for pq in practice_quiz}
+        for q in room.questions:
+            opts = q.get("options") or []
+            candidate_q = f"Mastery Check: {q.get('question', '')}"
+            if len(opts) == 4 and candidate_q not in existing_texts:
+                explanations = q.get("option_explanations") or []
+                c_idx = int(q.get("correct_option_index", 0))
+                expl = explanations[c_idx] if 0 <= c_idx < len(explanations) else f"Correct answer: {q.get('reference_answer', '')}"
+                practice_quiz.append(
+                    {
+                        "question": candidate_q,
+                        "options": opts,
+                        "correct_option_index": c_idx,
+                        "explanation": expl,
+                    }
+                )
+            if len(practice_quiz) >= 2:
+                break
+
+    return practice_quiz
+
+
 def _build_fast_fallback_study_kit(room: GameRoom, p: Participant) -> Dict[str, Any]:
     mistake_cards = []
-    practice_quiz = []
-
     for m in p.missed_questions[:4]:
         mistake_cards.append(
             {
@@ -576,19 +617,9 @@ def _build_fast_fallback_study_kit(room: GameRoom, p: Participant) -> Dict[str, 
                 "tag": "Mistake Review",
             }
         )
-        opts = m.get("options") or []
-        if len(opts) == 4:
-            practice_quiz.append(
-                {
-                    "question": f"Retry Concept: {m.get('question', '')}",
-                    "options": opts,
-                    "correct_option_index": int(m.get("correct_option_index", 0)),
-                    "explanation": m.get("explanation", f"The correct answer is {m.get('correct_answer', '')}."),
-                }
-            )
 
     summary = (
-        "Perfect score! Review the key topic flashcards below."
+        "Perfect score! Review the key topic flashcards and try the mastery check below."
         if not p.missed_questions
         else f"You missed {len(p.missed_questions)} question(s). Flip the remediation cards and complete the mini-quiz below:"
     )
@@ -597,7 +628,7 @@ def _build_fast_fallback_study_kit(room: GameRoom, p: Participant) -> Dict[str, 
         "summary": summary,
         "topic_flashcards": room.topic_flashcards,
         "flashcards": mistake_cards,
-        "remediation_quiz": practice_quiz,
+        "remediation_quiz": _build_practice_questions_from_pool(room, p),
     }
 
 
@@ -623,6 +654,8 @@ async def _prewarm_player_study_kit(room: GameRoom, p: Participant) -> None:
         deck_dict = deck_obj.model_dump()
         if not deck_dict.get("topic_flashcards"):
             deck_dict["topic_flashcards"] = room.topic_flashcards
+        if not deck_dict.get("remediation_quiz"):
+            deck_dict["remediation_quiz"] = _build_practice_questions_from_pool(room, p)
     except Exception:
         deck_dict = _build_fast_fallback_study_kit(room, p)
         model_used = "Instant Concept Kit"
@@ -645,7 +678,6 @@ async def _prewarm_player_study_kit(room: GameRoom, p: Participant) -> None:
             await p.ws.send_json({"type": "STUDY_KIT_READY", "remediation_deck": deck_dict})
         except Exception:
             p.ws = None
-
 
 async def _complete_match(room: GameRoom) -> None:
     room.status = "COMPLETED"

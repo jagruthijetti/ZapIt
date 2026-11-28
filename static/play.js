@@ -394,35 +394,39 @@ function renderStudyKit(deck) {
       .join("");
   }
 
-  const practiceBox = document.getElementById("ppodium-practice-box");
+const practiceBox = document.getElementById("ppodium-practice-box");
   const practiceList = document.getElementById("ppodium-practice-list");
   practiceQuizData = Array.isArray(deck.remediation_quiz) ? deck.remediation_quiz : [];
-  if (practiceBox && practiceList && practiceQuizData.length > 0) {
-    practiceBox.classList.remove("hidden");
-    const letters = ["A", "B", "C", "D"];
-    practiceList.innerHTML = practiceQuizData
-      .map(
-        (pq, qIdx) => `
-        <div id="pq-card-${qIdx}" class="p-4 rounded-2xl bg-zinc-950/90 border border-emerald-500/30 space-y-3">
-          <div class="text-xs font-bold text-emerald-400">Practice Question #${qIdx + 1}</div>
-          <div class="text-sm font-semibold text-zinc-100">${escapeHtml(pq.question)}</div>
-          <div class="grid sm:grid-cols-2 gap-2">
-            ${(pq.options || [])
-              .map(
-                (opt, oIdx) => `
-                <button type="button" onclick="answerPracticeQuestion(${qIdx}, ${oIdx}, this)"
-                  class="pq-opt-${qIdx} p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 hover:border-emerald-400 text-left text-xs text-zinc-200 transition">
-                  <strong>${letters[oIdx]}.</strong> ${escapeHtml(opt)}
-                </button>
-              `
-              )
-              .join("")}
+  if (practiceBox && practiceList) {
+    if (practiceQuizData.length > 0) {
+      practiceBox.classList.remove("hidden");
+      const letters = ["A", "B", "C", "D"];
+      practiceList.innerHTML = practiceQuizData
+        .map(
+          (pq, qIdx) => `
+          <div id="pq-card-${qIdx}" class="p-4 rounded-2xl bg-zinc-950/90 border border-emerald-500/30 space-y-3">
+            <div class="text-xs font-bold text-emerald-400">Practice Question #${qIdx + 1}</div>
+            <div class="text-sm font-semibold text-zinc-100">${escapeHtml(pq.question)}</div>
+            <div class="grid sm:grid-cols-2 gap-2">
+              ${(pq.options || [])
+                .map(
+                  (opt, oIdx) => `
+                  <button type="button" onclick="answerPracticeQuestion(${qIdx}, ${oIdx}, this)"
+                    class="pq-opt-${qIdx} p-2.5 rounded-xl bg-zinc-900 border border-zinc-800 hover:border-emerald-400 text-left text-xs text-zinc-200 transition">
+                    <strong>${letters[oIdx]}.</strong> ${escapeHtml(opt)}
+                  </button>
+                `
+                )
+                .join("")}
+            </div>
+            <div id="pq-feedback-${qIdx}" class="hidden p-3 rounded-xl text-xs leading-relaxed"></div>
           </div>
-          <div id="pq-feedback-${qIdx}" class="hidden p-3 rounded-xl text-xs leading-relaxed"></div>
-        </div>
-      `
-      )
-      .join("");
+        `
+        )
+        .join("");
+    } else {
+      practiceBox.classList.add("hidden");
+    }
   }
 }
 
